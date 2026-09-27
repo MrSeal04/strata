@@ -391,8 +391,8 @@ impl DiffWorker {
                     Some(o) => match memo.get(&o) {
                         Some(v) => v.clone(),
                         None if !produced.contains(&o) => {
-                            if !blobs.contains_key(&o) {
-                                blobs.insert(o, self.blob(o)?);
+                            if let std::collections::hash_map::Entry::Vacant(e) = blobs.entry(o) {
+                                e.insert(self.blob(o)?);
                             }
                             vec![None; count_lines(&blobs[&o]) as usize]
                         }
@@ -400,8 +400,8 @@ impl DiffWorker {
                     },
                 };
                 for id in [t.old, Some(new_id)].into_iter().flatten() {
-                    if !blobs.contains_key(&id) {
-                        blobs.insert(id, self.blob(id)?);
+                    if let std::collections::hash_map::Entry::Vacant(e) = blobs.entry(id) {
+                        e.insert(self.blob(id)?);
                     }
                 }
                 let old: &[u8] = t.old.map_or(&[][..], |o| &blobs[&o]);

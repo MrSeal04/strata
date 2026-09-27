@@ -148,10 +148,10 @@ fn load_checkpoint(state_dir: &Path) -> anyhow::Result<Option<Checkpoint>> {
         &mut raw,
     )?;
     let cfg = bincode::config::standard();
-    if let Ok((cp, _)) = bincode::serde::decode_from_slice::<Checkpoint, _>(&raw, cfg) {
-        if cp.format == CHECKPOINT_FORMAT {
-            return Ok(Some(cp));
-        }
+    if let Ok((cp, _)) = bincode::serde::decode_from_slice::<Checkpoint, _>(&raw, cfg)
+        && cp.format == CHECKPOINT_FORMAT
+    {
+        return Ok(Some(cp));
     }
     match bincode::serde::decode_from_slice::<CheckpointV1, _>(&raw, cfg) {
         Ok((v1, _)) if v1.format == 1 => Ok(Some(Checkpoint {
