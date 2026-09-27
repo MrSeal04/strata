@@ -86,12 +86,33 @@ pub struct FileDiff {
     pub new_id: Option<ObjectId>,
 }
 
+/// Copy origins across the unchanged lines of a diff (`src` = the old version's origins).
+fn carry(out: &mut [Option<usize>], src: &[Option<usize>], hunks: &[Hunk]) {
+    let (mut a, mut b) = (0usize, 0usize);
+    let n = out.len();
+    let copy = |out: &mut [Option<usize>], a_end: usize, a: &mut usize, b: &mut usize| {
+        while *a < a_end && *a < n && *b < src.len() {
+            out[*a] = src[*b];
+            *a += 1;
+            *b += 1;
+        }
+    };
+    for h in hunks {
+        copy(out, h.a0 as usize, &mut a, &mut b);
+        a = h.a1 as usize;
+        b = h.b1 as usize;
+    }
+    copy(out, n, &mut a, &mut b);
+}
+
 /// One side commit's change to a path (old/new blob ids; None = absent).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Touch {
     side: usize,
     old: Option<ObjectId>,
     new: Option<ObjectId>,
+    /// For a merge inside the side branch: the file in its other parents (None = absent).
+    others: SmallVec<[Option<ObjectId>; 1]>,
 }
 
 #[derive(Debug)]
@@ -288,12 +309,15 @@ impl DiffWorker {
     ) -> anyhow::Result<rustc_hash::FxHashMap<BString, Vec<Touch>>> {
         let mut touched: rustc_hash::FxHashMap<BString, Vec<Touch>> = Default::default();
         for (i, sc) in side.iter().enumerate() {
-            if sc.is_merge {
-                continue;
-            }
             let Ok(new_tree) = self.repo.find_commit(sc.id).and_then(|c| c.tree()) else {
                 continue;
             };
+            // Merges inside the side branch: the file's version in each other parent.
+            let other_trees: Vec<gix::Tree<'_>> = sc
+                .other_parents
+                .iter()
+                .filter_map(|p| self.repo.find_commit(*p).ok()?.tree().ok())
+                .collect();
             // A root commit (unrelated history) is diffed against the empty tree.
             let old_tree = match sc.first_parent {
                 Some(parent) => match self.repo.find_commit(parent).and_then(|c| c.tree()) {
@@ -336,14 +360,34 @@ impl DiffWorker {
                         _ => None,
                     };
                     if let Some((old, new)) = t {
-                        found.push((change.location().to_owned(), Touch { side: i, old, new }));
+                        found.push((
+                            change.location().to_owned(),
+                            Touch {
+                                side: i,
+                                old,
+                                new,
+                                others: SmallVec::new(),
+                            },
+                        ));
                     }
                     Ok(ControlFlow::Continue(()))
                 },
                 opts,
             )
             .map_err(|e| anyhow::anyhow!("tree diff of side commit {}: {e}", sc.id))?;
-            for (p, t) in found {
+            for (p, mut t) in found {
+                if !other_trees.is_empty() {
+                    let os: &std::ffi::OsStr = &p.to_os_str_lossy();
+                    t.others = other_trees
+                        .iter()
+                        .map(|tree| {
+                            tree.lookup_entry_by_path(os)
+                                .ok()
+                                .flatten()
+                                .map(|e| e.object_id())
+                        })
+                        .collect();
+                }
                 touched.entry(p).or_default().push(t);
             }
         }
@@ -386,38 +430,39 @@ impl DiffWorker {
                     progress = true;
                     continue;
                 }
-                let old_origins: Vec<Option<usize>> = match t.old {
-                    None => Vec::new(),
-                    Some(o) => match memo.get(&o) {
-                        Some(v) => v.clone(),
-                        None if !produced.contains(&o) => {
-                            if let std::collections::hash_map::Entry::Vacant(e) = blobs.entry(o) {
-                                e.insert(self.blob(o)?);
-                            }
-                            vec![None; count_lines(&blobs[&o]) as usize]
-                        }
-                        None => continue, // wait for the edit that produces this version
-                    },
-                };
-                for id in [t.old, Some(new_id)].into_iter().flatten() {
+                // Every parent version must be known: from an earlier edit, or from outside the
+                // side branch (then its lines are "boundary").
+                let parents: SmallVec<[ObjectId; 2]> = t
+                    .old
+                    .into_iter()
+                    .chain(t.others.iter().flatten().copied())
+                    .collect();
+                if parents
+                    .iter()
+                    .any(|p| produced.contains(p) && !memo.contains_key(p))
+                {
+                    continue;
+                }
+                for id in parents.iter().copied().chain(std::iter::once(new_id)) {
                     if let std::collections::hash_map::Entry::Vacant(e) = blobs.entry(id) {
                         e.insert(self.blob(id)?);
                     }
                 }
-                let old: &[u8] = t.old.map_or(&[][..], |o| &blobs[&o]);
                 let new: &[u8] = &blobs[&new_id];
-                if is_binary(old) || is_binary(new) {
+                if is_binary(new) || parents.iter().any(|p| is_binary(&blobs[p])) {
                     return Ok(None);
                 }
-                let (hunks, _, _) = ws_diff(old, new);
-                let mut out: Vec<Option<usize>> = Vec::with_capacity(count_lines(new) as usize);
-                let mut pos = 0usize;
-                for h in &hunks {
-                    out.extend_from_slice(old_origins.get(pos..h.b0 as usize).unwrap_or_default());
-                    out.extend(std::iter::repeat_n(Some(t.side), (h.a1 - h.a0) as usize));
-                    pos = h.b1 as usize;
+                // Lines no parent has were written by this commit; the rest keep their origin.
+                // Other parents first, the first parent last so it wins ties.
+                let mut out: Vec<Option<usize>> = vec![Some(t.side); count_lines(new) as usize];
+                for p in parents.iter().rev() {
+                    let src: Vec<Option<usize>> = match memo.get(p) {
+                        Some(v) => v.clone(),
+                        None => vec![None; count_lines(&blobs[p]) as usize],
+                    };
+                    let (hunks, _, _) = ws_diff(&blobs[p], new);
+                    carry(&mut out, &src, &hunks);
                 }
-                out.extend_from_slice(old_origins.get(pos..).unwrap_or_default());
                 memo.insert(new_id, out);
                 done[i] = true;
                 progress = true;

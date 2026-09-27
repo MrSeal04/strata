@@ -568,8 +568,10 @@ pub fn extract(
     let mut done = 0u64;
     let mut last_cp = Instant::now();
     let mut last_progress = Instant::now();
-    let mut ema_rate: Option<f64> = None;
-    let mut rate_mark = (Instant::now(), 0u64);
+    // Throughput over the trailing window: steps vary wildly in cost (huge merges), so a
+    // seconds-long average makes ETAs swing; five minutes keeps them honest.
+    let mut samples: std::collections::VecDeque<(Instant, u64)> = std::collections::VecDeque::new();
+    samples.push_back((Instant::now(), 0));
 
     let run: anyhow::Result<Landing> = std::thread::scope(|s| {
         let ids = &chain.ids;
@@ -638,14 +640,13 @@ pub fn extract(
                     permit_tx.send(()).ok();
 
                     if last_progress.elapsed() >= Duration::from_millis(500) || done == total {
-                        let dt = rate_mark.0.elapsed().as_secs_f64();
-                        if dt >= 2.0 {
-                            let r = (done - rate_mark.1) as f64 / dt;
-                            ema_rate = Some(ema_rate.map_or(r, |e| 0.7 * e + 0.3 * r));
-                            rate_mark = (Instant::now(), done);
+                        samples.push_back((Instant::now(), done));
+                        while samples.len() > 2 && samples[1].0.elapsed() > Duration::from_secs(300)
+                        {
+                            samples.pop_front();
                         }
-                        let rate = ema_rate
-                            .unwrap_or(done as f64 / started.elapsed().as_secs_f64().max(1e-3));
+                        let (t0, d0) = samples[0];
+                        let rate = (done - d0) as f64 / t0.elapsed().as_secs_f64().max(1e-3);
                         progress(&Progress {
                             phase: "diff",
                             done,

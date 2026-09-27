@@ -74,6 +74,8 @@ pub struct SideCommit {
     pub summary: String,
     pub first_parent: Option<ObjectId>,
     pub is_merge: bool,
+    /// Parents after the first (non-empty for merges inside the side branch).
+    pub other_parents: Vec<ObjectId>,
 }
 
 /// Maps every commit in the analyzed history to the first-parent step that landed it.
@@ -141,6 +143,7 @@ impl Landing {
                     id: cid,
                     first_parent: parents.first().copied(),
                     is_merge: parents.len() > 1,
+                    other_parents: parents.get(1..).unwrap_or_default().to_vec(),
                     author: read_signature(c.author()?),
                     summary: c
                         .message
