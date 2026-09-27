@@ -43,7 +43,8 @@ impl RepoConfig {
         for path in candidates {
             if path.is_file() {
                 let text = std::fs::read_to_string(path)?;
-                return toml::from_str(&text).with_context(|| format!("parsing {}", path.display()));
+                return toml::from_str(&text)
+                    .with_context(|| format!("parsing {}", path.display()));
             }
         }
         Ok(Self::default())

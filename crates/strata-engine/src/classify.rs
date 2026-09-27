@@ -25,7 +25,10 @@ pub fn language(path: &str) -> Option<u16> {
     }
     let dot = file.rfind('.').filter(|&i| i > 0)?;
     let ext = file[dot..].to_ascii_lowercase();
-    EXTENSIONS.binary_search_by(|(e, _)| (*e).cmp(ext.as_str())).ok().map(|i| EXTENSIONS[i].1)
+    EXTENSIONS
+        .binary_search_by(|(e, _)| (*e).cmp(ext.as_str()))
+        .ok()
+        .map(|i| EXTENSIONS[i].1)
 }
 
 pub fn lang_name(idx: Option<u16>) -> &'static str {
@@ -33,23 +36,76 @@ pub fn lang_name(idx: Option<u16>) -> &'static str {
 }
 
 pub fn lang_color(name: &str) -> Option<&'static str> {
-    LANGS.iter().find(|(n, _, _)| *n == name).map(|(_, c, _)| *c).filter(|c| !c.is_empty())
+    LANGS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, c, _)| *c)
+        .filter(|c| !c.is_empty())
 }
 
 const LOCKFILES: &[&str] = &[
-    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb",
-    "Cargo.lock", "uv.lock", "poetry.lock", "Pipfile.lock", "pdm.lock", "pixi.lock", "conda-lock.yml",
-    "composer.lock", "Gemfile.lock", "go.sum", "go.work.sum", "flake.lock", "mix.lock", "pubspec.lock",
-    "Podfile.lock", "Package.resolved", "packages.lock.json", "gradle.lockfile", "deno.lock",
-    ".terraform.lock.hcl", "Manifest.toml", "shard.lock", "rebar.lock", "cabal.project.freeze",
-    "stack.yaml.lock", "yarn-offline-mirror", "berksfile.lock", "Chart.lock", "renv.lock",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "bun.lock",
+    "bun.lockb",
+    "Cargo.lock",
+    "uv.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+    "pdm.lock",
+    "pixi.lock",
+    "conda-lock.yml",
+    "composer.lock",
+    "Gemfile.lock",
+    "go.sum",
+    "go.work.sum",
+    "flake.lock",
+    "mix.lock",
+    "pubspec.lock",
+    "Podfile.lock",
+    "Package.resolved",
+    "packages.lock.json",
+    "gradle.lockfile",
+    "deno.lock",
+    ".terraform.lock.hcl",
+    "Manifest.toml",
+    "shard.lock",
+    "rebar.lock",
+    "cabal.project.freeze",
+    "stack.yaml.lock",
+    "yarn-offline-mirror",
+    "berksfile.lock",
+    "Chart.lock",
+    "renv.lock",
 ];
 
 /// linguist calls these "data", but they are hand-written configuration, not bulk data.
 const CONFIG_LANGS: &[&str] = &[
-    "YAML", "TOML", "INI", "Git Config", "Ignore List", "EditorConfig", "JSON with Comments", "Dotenv",
-    "Git Attributes", "Nix", "HCL", "Dockerfile", "Makefile", "CMake", "Linker Script", "Kconfig",
-    "Device Tree", "Protocol Buffer", "GraphQL", "SSH Config", "Nginx", "Apache Conf", "Starlark",
+    "YAML",
+    "TOML",
+    "INI",
+    "Git Config",
+    "Ignore List",
+    "EditorConfig",
+    "JSON with Comments",
+    "Dotenv",
+    "Git Attributes",
+    "Nix",
+    "HCL",
+    "Dockerfile",
+    "Makefile",
+    "CMake",
+    "Linker Script",
+    "Kconfig",
+    "Device Tree",
+    "Protocol Buffer",
+    "GraphQL",
+    "SSH Config",
+    "Nginx",
+    "Apache Conf",
+    "Starlark",
 ];
 
 const GENERATED_PATTERNS: &[&str] = &[
@@ -88,7 +144,11 @@ pub struct Classifier {
 }
 
 fn glob(pattern: &str) -> Option<GlobMatcher> {
-    GlobBuilder::new(pattern).literal_separator(true).build().ok().map(|g| g.compile_matcher())
+    GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .build()
+        .ok()
+        .map(|g| g.compile_matcher())
 }
 
 /// Translate a gitattributes pattern in directory `dir` ("" or "a/b/") into a glob.
@@ -113,7 +173,9 @@ fn parse_attributes(dir: &str, content: &[u8], out: &mut Vec<AttrRule>) {
             continue;
         }
         let mut parts = line.split_whitespace();
-        let Some(pattern) = parts.next() else { continue };
+        let Some(pattern) = parts.next() else {
+            continue;
+        };
         let mut effects = Vec::new();
         for attr in parts {
             let (name, value) = if let Some(n) = attr.strip_prefix('-') {
@@ -137,10 +199,10 @@ fn parse_attributes(dir: &str, content: &[u8], out: &mut Vec<AttrRule>) {
             let value = if name == "diff" { Some(true) } else { value };
             effects.push((a, value));
         }
-        if !effects.is_empty() {
-            if let Some(glob) = attr_glob(dir, pattern) {
-                out.push(AttrRule { glob, effects });
-            }
+        if !effects.is_empty()
+            && let Some(glob) = attr_glob(dir, pattern)
+        {
+            out.push(AttrRule { glob, effects });
         }
     }
 }
@@ -148,7 +210,11 @@ fn parse_attributes(dir: &str, content: &[u8], out: &mut Vec<AttrRule>) {
 impl Classifier {
     /// `attr_files`: (directory prefix like "" or "sub/dir/", .gitattributes content), shallowest first.
     pub fn new(attr_files: &[(String, Vec<u8>)], cfg: &RepoConfig) -> Self {
-        let valid: Vec<&str> = VENDOR_PATTERNS.iter().copied().filter(|p| Regex::new(p).is_ok()).collect();
+        let valid: Vec<&str> = VENDOR_PATTERNS
+            .iter()
+            .copied()
+            .filter(|p| Regex::new(p).is_ok())
+            .collect();
         let mut attr_rules = Vec::new();
         for (dir, content) in attr_files {
             parse_attributes(dir, content, &mut attr_rules);
@@ -234,9 +300,15 @@ impl Classifier {
 pub fn looks_generated(head: &[u8]) -> bool {
     let head = &head[..head.len().min(1024)];
     let lower = head.to_ascii_lowercase();
-    [&b"do not edit"[..], b"@generated", b"code generated", b"autogenerated", b"auto-generated"]
-        .iter()
-        .any(|needle| memchr_find(&lower, needle))
+    [
+        &b"do not edit"[..],
+        b"@generated",
+        b"code generated",
+        b"autogenerated",
+        b"auto-generated",
+    ]
+    .iter()
+    .any(|needle| memchr_find(&lower, needle))
 }
 
 fn memchr_find(hay: &[u8], needle: &[u8]) -> bool {
@@ -254,7 +326,10 @@ mod tests {
     #[test]
     fn categories_and_languages() {
         let attrs = vec![
-            (String::new(), b"*.gen.ts linguist-generated\nthird_party/** linguist-vendored\n".to_vec()),
+            (
+                String::new(),
+                b"*.gen.ts linguist-generated\nthird_party/** linguist-vendored\n".to_vec(),
+            ),
             ("web/".to_string(), b"fixtures/** -diff\n".to_vec()),
         ];
         let mut cfg = RepoConfig::default();
@@ -277,7 +352,9 @@ mod tests {
         assert_eq!(lang_name(language("Makefile")), "Makefile");
         assert_eq!(lang_name(language("include/linux/sched.h")), "C");
         assert_eq!(lang_name(language("LICENSE_NOEXT")), "Other");
-        assert!(looks_generated(b"// Code generated by protoc-gen-go. DO NOT EDIT.\npackage x"));
+        assert!(looks_generated(
+            b"// Code generated by protoc-gen-go. DO NOT EDIT.\npackage x"
+        ));
         assert!(!looks_generated(b"fn main() {}"));
     }
 }

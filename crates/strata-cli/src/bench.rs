@@ -1,0 +1,230 @@
+//! `strata bench`: time extraction, peak memory and every query endpoint on one repo.
+
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
+
+use clap::Args;
+use strata_engine::ExtractOptions;
+use strata_store::pipeline::extract_source;
+use strata_store::{AreaMode, AreaQuery, Axis, Bins, Db, Filters, Layout, Slice, Source};
+
+#[derive(Args)]
+pub struct BenchArgs {
+    /// Repo directory or git URL
+    pub source: String,
+    /// Force a full re-extract (otherwise incremental)
+    #[arg(long)]
+    pub full: bool,
+    /// Query repetitions per endpoint
+    #[arg(long, default_value_t = 7)]
+    pub reps: usize,
+    #[arg(long)]
+    pub threads: Option<usize>,
+}
+
+fn peak_rss_mb() -> f64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmHWM:"))
+                .map(str::to_string)
+        })
+        .and_then(|l| {
+            l.split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse::<f64>().ok())
+        })
+        .map_or(0.0, |kb| kb / 1024.0)
+}
+
+fn dir_size(p: &std::path::Path) -> u64 {
+    std::fs::read_dir(p)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| match e.metadata() {
+            Ok(m) if m.is_dir() => dir_size(&e.path()),
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    sorted[((sorted.len() - 1) as f64 * p).round() as usize]
+}
+
+pub fn run(layout: Layout, args: BenchArgs) -> anyhow::Result<()> {
+    let source = Source::parse(&args.source)?;
+    let mut opts = ExtractOptions {
+        full: args.full,
+        ..Default::default()
+    };
+    if let Some(t) = args.threads {
+        opts.threads = t;
+    }
+    let t0 = Instant::now();
+    let mut rep = crate::progress::Reporter::new(false, false);
+    let meta = extract_source(
+        &layout,
+        &source,
+        &opts,
+        false,
+        &AtomicBool::new(false),
+        &mut |p| rep.update(p),
+    )?;
+    rep.finish();
+    let extract_s = t0.elapsed().as_secs_f64();
+    let rss = peak_rss_mb();
+    let size = dir_size(&layout.repo_dir(&meta.id)) as f64 / 1e6;
+    println!(
+        "repo            {} ({} steps, {} new)",
+        meta.name, meta.steps, meta.last_run["steps_new"]
+    );
+    println!(
+        "extract         {extract_s:.2}s  ({:.0} steps/s)",
+        meta.last_run["steps_new"].as_f64().unwrap_or(0.0) / extract_s.max(1e-9)
+    );
+    println!("peak rss        {rss:.0} MB");
+    println!("cache size      {size:.1} MB");
+
+    let db = Db::new(layout.clone())?;
+    let t = Instant::now();
+    db.ensure_loaded(&meta.id)?;
+    println!("load            {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+    let f = Filters {
+        exclude: vec![4, 5, 6, 7],
+        ..Default::default()
+    };
+    let last = meta.steps.saturating_sub(1);
+    let b = Bins {
+        axis: Axis::Index,
+        lo: 0.0,
+        hi: f64::from(meta.steps),
+        bins: 1600,
+    };
+    let bt = Bins {
+        axis: Axis::Time,
+        lo: meta.first_time as f64,
+        hi: meta.last_time as f64 + 1.0,
+        bins: 1600,
+    };
+    let id = meta.id.clone();
+    type Q<'a> = Box<dyn Fn() -> anyhow::Result<usize> + 'a>;
+    let area = |slice, mode| AreaQuery {
+        slice,
+        mode,
+        depth: 1,
+        top: 12,
+        unit: "year".into(),
+    };
+    let queries: Vec<(&str, Q)> = vec![
+        (
+            "summary",
+            Box::new(|| Ok(db.summary(&id)?.to_string().len())),
+        ),
+        ("axis", Box::new(|| Ok(db.axis(&id)?.len()))),
+        ("paths", Box::new(|| Ok(db.paths(&id)?.len()))),
+        ("bars/index", Box::new(|| Ok(db.bars(&id, &f, &b)?.len()))),
+        ("bars/time", Box::new(|| Ok(db.bars(&id, &f, &bt)?.len()))),
+        (
+            "area/dir",
+            Box::new(|| {
+                Ok(db
+                    .area(&id, &f, &b, &area(Slice::Dir, AreaMode::Size))?
+                    .len())
+            }),
+        ),
+        (
+            "area/lang",
+            Box::new(|| {
+                Ok(db
+                    .area(&id, &f, &b, &area(Slice::Lang, AreaMode::Size))?
+                    .len())
+            }),
+        ),
+        (
+            "area/author",
+            Box::new(|| {
+                Ok(db
+                    .area(&id, &f, &b, &area(Slice::Author, AreaMode::Size))?
+                    .len())
+            }),
+        ),
+        (
+            "area/cohort",
+            Box::new(|| {
+                Ok(db
+                    .area(&id, &f, &b, &area(Slice::Cohort, AreaMode::Size))?
+                    .len())
+            }),
+        ),
+        (
+            "area/dir flow",
+            Box::new(|| {
+                Ok(db
+                    .area(&id, &f, &b, &area(Slice::Dir, AreaMode::Flow))?
+                    .len())
+            }),
+        ),
+        (
+            "state/last",
+            Box::new(|| Ok(db.state(&id, last, &f)?.len())),
+        ),
+        (
+            "state/mid",
+            Box::new(|| Ok(db.state(&id, last / 2, &f)?.len())),
+        ),
+        (
+            "events/200",
+            Box::new(|| {
+                Ok(db
+                    .events(&id, i64::from(last / 2), last / 2 + 200, &f)?
+                    .len())
+            }),
+        ),
+        (
+            "compare",
+            Box::new(|| Ok(db.compare(&id, last / 2, last, &f)?.len())),
+        ),
+        (
+            "step",
+            Box::new(|| Ok(db.step(&id, last / 2)?.to_string().len())),
+        ),
+        (
+            "commits",
+            Box::new(|| Ok(db.commits(&id, 0, last, &f, 20)?.len())),
+        ),
+        (
+            "search/msg",
+            Box::new(|| Ok(db.search(&id, "fix", "message", 20_000)?.to_string().len())),
+        ),
+        (
+            "search/path",
+            Box::new(|| Ok(db.search(&id, "src", "path", 20_000)?.to_string().len())),
+        ),
+        ("dirs", Box::new(|| Ok(db.dirs(&id, "", &f)?.len()))),
+    ];
+    println!(
+        "{:<16}{:>10}{:>10}{:>12}",
+        "query", "p50 ms", "p95 ms", "bytes"
+    );
+    for (name, q) in &queries {
+        let mut times = Vec::new();
+        let mut bytes = 0;
+        for _ in 0..args.reps.max(1) {
+            let t = Instant::now();
+            bytes = q()?;
+            times.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        times.sort_by(f64::total_cmp);
+        println!(
+            "{name:<16}{:>10.1}{:>10.1}{bytes:>12}",
+            percentile(&times, 0.5),
+            percentile(&times, 0.95)
+        );
+    }
+    println!("peak rss (end)  {:.0} MB", peak_rss_mb());
+    Ok(())
+}

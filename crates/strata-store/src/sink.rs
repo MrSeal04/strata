@@ -51,7 +51,9 @@ fn opt_id(id: u32) -> Option<u32> {
 /// First step encoded in a part file name (`part-<first>-<last>.parquet` or `kf-<step>.parquet`).
 fn part_first_step(name: &str) -> Option<u32> {
     let stem = name.strip_suffix(".parquet")?;
-    let rest = stem.strip_prefix("part-").or_else(|| stem.strip_prefix("kf-"))?;
+    let rest = stem
+        .strip_prefix("part-")
+        .or_else(|| stem.strip_prefix("kf-"))?;
     rest.split('-').next()?.parse().ok()
 }
 
@@ -93,18 +95,45 @@ impl ParquetSink {
             let mut app = self.conn.appender("steps")?;
             for r in self.steps.drain(..) {
                 app.append_row(params![
-                    r.step, r.sha, r.author_id, r.committer_id, r.author_time, r.commit_time, r.axis_time,
-                    r.is_merge, r.side_count, r.summary, r.message, r.adds, r.dels, r.adds_ws, r.dels_ws,
-                    r.files_changed, r.flags
+                    r.step,
+                    r.sha,
+                    r.author_id,
+                    r.committer_id,
+                    r.author_time,
+                    r.commit_time,
+                    r.axis_time,
+                    r.is_merge,
+                    r.side_count,
+                    r.summary,
+                    r.message,
+                    r.adds,
+                    r.dels,
+                    r.adds_ws,
+                    r.dels_ws,
+                    r.files_changed,
+                    r.flags
                 ])?;
             }
             app.flush()?;
             let mut app = self.conn.appender("changes")?;
             for r in self.changes.drain(..) {
                 app.append_row(params![
-                    r.step, r.path_id, r.kind, opt_id(r.old_path_id), r.adds, r.dels, r.adds_ws, r.dels_ws,
-                    r.lines_after, r.line_delta, r.bytes_after, r.mean_origin_time, opt_id(r.top_author),
-                    r.top_share, r.binary, r.approx
+                    r.step,
+                    r.path_id,
+                    r.kind,
+                    opt_id(r.old_path_id),
+                    r.adds,
+                    r.dels,
+                    r.adds_ws,
+                    r.dels_ws,
+                    r.lines_after,
+                    r.line_delta,
+                    r.bytes_after,
+                    r.mean_origin_time,
+                    opt_id(r.top_author),
+                    r.top_share,
+                    r.binary,
+                    r.approx
                 ])?;
             }
             app.flush()?;
@@ -115,7 +144,13 @@ impl ParquetSink {
             app.flush()?;
             let mut app = self.conn.appender("side_commits")?;
             for r in self.side.drain(..) {
-                app.append_row(params![r.sha, r.landing_step, r.author_id, r.author_time, r.summary])?;
+                app.append_row(params![
+                    r.sha,
+                    r.landing_step,
+                    r.author_id,
+                    r.author_time,
+                    r.summary
+                ])?;
             }
             app.flush()?;
         }
@@ -132,10 +167,13 @@ impl Sink for ParquetSink {
     fn begin(&mut self, from_step: Step) -> anyhow::Result<()> {
         for table in TABLES {
             let dir = self.dir.join(table);
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for e in entries.flatten() {
                 let name = e.file_name().to_string_lossy().into_owned();
-                let stale = name.ends_with(".tmp") || part_first_step(&name).is_none_or(|s| s >= from_step);
+                let stale =
+                    name.ends_with(".tmp") || part_first_step(&name).is_none_or(|s| s >= from_step);
                 if stale {
                     std::fs::remove_file(e.path()).with_context(|| format!("removing {name}"))?;
                 }
@@ -160,8 +198,14 @@ impl Sink for ParquetSink {
             let mut app = self.conn.appender("keyframes")?;
             for r in rows {
                 app.append_row(params![
-                    r.kf_step, r.path_id, r.lines, r.bytes, r.mean_origin_time, opt_id(r.top_author),
-                    r.top_share, r.binary
+                    r.kf_step,
+                    r.path_id,
+                    r.lines,
+                    r.bytes,
+                    r.mean_origin_time,
+                    opt_id(r.top_author),
+                    r.top_share,
+                    r.binary
                 ])?;
             }
             app.flush()?;
@@ -180,12 +224,25 @@ impl Sink for ParquetSink {
         {
             let mut app = self.conn.appender("paths")?;
             for r in dims.paths {
-                app.append_row(params![r.path_id, r.path, r.lang, r.category, r.first_step, r.last_step])?;
+                app.append_row(params![
+                    r.path_id,
+                    r.path,
+                    r.lang,
+                    r.category,
+                    r.first_step,
+                    r.last_step
+                ])?;
             }
             app.flush()?;
             let mut app = self.conn.appender("authors")?;
             for r in dims.authors {
-                app.append_row(params![r.author_id, r.canonical_id, r.name, r.email, r.is_bot])?;
+                app.append_row(params![
+                    r.author_id,
+                    r.canonical_id,
+                    r.name,
+                    r.email,
+                    r.is_bot
+                ])?;
             }
             app.flush()?;
             let mut app = self.conn.appender("tags")?;
@@ -207,7 +264,10 @@ mod tests {
 
     #[test]
     fn part_names() {
-        assert_eq!(part_first_step("part-0000000010-0000000020.parquet"), Some(10));
+        assert_eq!(
+            part_first_step("part-0000000010-0000000020.parquet"),
+            Some(10)
+        );
         assert_eq!(part_first_step("kf-0000000042.parquet"), Some(42));
         assert_eq!(part_first_step("x.parquet"), None);
     }

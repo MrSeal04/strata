@@ -119,7 +119,10 @@ fn load_checkpoint(state_dir: &Path) -> anyhow::Result<Option<Checkpoint>> {
     }
     let f = std::fs::File::open(&path)?;
     let mut r = BufReader::new(zstd::Decoder::new(f)?);
-    match bincode::serde::decode_from_std_read::<Checkpoint, _, _>(&mut r, bincode::config::standard()) {
+    match bincode::serde::decode_from_std_read::<Checkpoint, _, _>(
+        &mut r,
+        bincode::config::standard(),
+    ) {
         Ok(cp) if cp.format == CHECKPOINT_FORMAT => Ok(Some(cp)),
         _ => Ok(None), // unreadable or old format: start over
     }
@@ -158,7 +161,11 @@ impl State {
 }
 
 fn sig_ref(s: &crate::diff::Signature) -> gix::actor::SignatureRef<'_> {
-    gix::actor::SignatureRef { name: s.name.as_bstr(), email: s.email.as_bstr(), time: "" }
+    gix::actor::SignatureRef {
+        name: s.name.as_bstr(),
+        email: s.email.as_bstr(),
+        time: "",
+    }
 }
 
 /// Turn one diffed step into rows, updating the tracker.
@@ -177,7 +184,13 @@ fn process_step(
         st.first_time = c.committer.time;
     }
 
-    let side = landing.land(repo, step, c.id, c.parents.get(1..).unwrap_or_default(), true)?;
+    let side = landing.land(
+        repo,
+        step,
+        c.id,
+        c.parents.get(1..).unwrap_or_default(),
+        true,
+    )?;
     let side_commits: Vec<SideCommitRow> = side
         .into_iter()
         .map(|s| SideCommitRow {
@@ -265,8 +278,19 @@ fn process_step(
         if f.kind == kind::DELETE {
             st.tracker.delete(path_id, &mut acc);
         } else if f.submodule || f.binary {
-            st.tracker.set_binary(path_id, if f.submodule { 0 } else { f.bytes_after }, &mut acc);
-        } else if !st.tracker.apply(path_id, &f.hunks, f.new_lines, f.bytes_after, &|_| origin, &mut acc) {
+            st.tracker.set_binary(
+                path_id,
+                if f.submodule { 0 } else { f.bytes_after },
+                &mut acc,
+            );
+        } else if !st.tracker.apply(
+            path_id,
+            &f.hunks,
+            f.new_lines,
+            f.bytes_after,
+            &|_| origin,
+            &mut acc,
+        ) {
             st.inconsistent += 1;
         }
 
@@ -285,7 +309,11 @@ fn process_step(
             dels_ws: f.dels_ws,
             lines_after,
             line_delta: lines_after as i32 - before as i32,
-            bytes_after: if f.kind == kind::DELETE { 0 } else { f.bytes_after },
+            bytes_after: if f.kind == kind::DELETE {
+                0
+            } else {
+                f.bytes_after
+            },
             mean_origin_time: mean,
             top_author,
             top_share,
@@ -294,7 +322,12 @@ fn process_step(
         });
         acc.drain_into(step, path_id, &mut deltas);
     }
-    Ok(StepOutput { step: row, changes, deltas, side_commits })
+    Ok(StepOutput {
+        step: row,
+        changes,
+        deltas,
+        side_commits,
+    })
 }
 
 /// Run extraction for the repo at `repo_dir`, keeping resumable state in `state_dir`.
@@ -309,16 +342,27 @@ pub fn extract(
 ) -> anyhow::Result<ExtractReport> {
     let started = Instant::now();
     std::fs::create_dir_all(state_dir)?;
-    let mut repo = gix::open(repo_dir).with_context(|| format!("opening {}", repo_dir.display()))?;
+    let mut repo =
+        gix::open(repo_dir).with_context(|| format!("opening {}", repo_dir.display()))?;
     repo.object_cache_size_if_unset(64 << 20);
-    progress(&Progress { phase: "walk", done: 0, total: 0, steps_per_sec: 0.0, eta_secs: None });
+    progress(&Progress {
+        phase: "walk",
+        done: 0,
+        total: 0,
+        steps_per_sec: 0.0,
+        eta_secs: None,
+    });
 
     let branch_pref = opts.branch.clone().or_else(|| cfg.branch.clone());
     let (branch, tip) = walk::resolve_tip(&repo, branch_pref.as_deref())?;
     let fingerprint = opts.fingerprint();
 
     let mut full_reason = None;
-    let mut cp = if opts.full { None } else { load_checkpoint(state_dir)? };
+    let mut cp = if opts.full {
+        None
+    } else {
+        load_checkpoint(state_dir)?
+    };
     if let Some(c) = &cp {
         if c.fingerprint != fingerprint {
             full_reason = Some("extraction settings or engine version changed".to_string());
@@ -329,10 +373,13 @@ pub fn extract(
             cp = None;
         }
     }
-    let stop = cp.as_ref().and_then(|c| c.last_sha.parse::<ObjectId>().ok());
+    let stop = cp
+        .as_ref()
+        .and_then(|c| c.last_sha.parse::<ObjectId>().ok());
     let mut chain = walk::first_parent_chain(&repo, tip, stop)?;
     if stop.is_some() && !chain.resumed {
-        full_reason = Some("history was rewritten (last extracted commit is no longer on the branch)".into());
+        full_reason =
+            Some("history was rewritten (last extracted commit is no longer on the branch)".into());
         cp = None;
         chain = walk::first_parent_chain(&repo, tip, None)?;
     }
@@ -340,7 +387,13 @@ pub fn extract(
     let mut landing = Landing::default();
     let mut chain_ids: Vec<ObjectId> = Vec::new();
     if let (Some(stop), Some(c)) = (stop, cp.as_ref()) {
-        progress(&Progress { phase: "reindex", done: 0, total: 0, steps_per_sec: 0.0, eta_secs: None });
+        progress(&Progress {
+            phase: "reindex",
+            done: 0,
+            total: 0,
+            steps_per_sec: 0.0,
+            eta_secs: None,
+        });
         let old = walk::first_parent_chain(&repo, stop, None)?;
         if old.ids.len() as Step != c.next_step {
             full_reason = Some("checkpoint does not match the history on disk".into());
@@ -348,8 +401,18 @@ pub fn extract(
             chain = walk::first_parent_chain(&repo, tip, None)?;
         } else {
             for (i, &id) in old.ids.iter().enumerate() {
-                let parents: Vec<ObjectId> = repo.find_commit(id)?.parent_ids().map(|p| p.detach()).collect();
-                landing.land(&repo, i as Step, id, parents.get(1..).unwrap_or_default(), false)?;
+                let parents: Vec<ObjectId> = repo
+                    .find_commit(id)?
+                    .parent_ids()
+                    .map(|p| p.detach())
+                    .collect();
+                landing.land(
+                    &repo,
+                    i as Step,
+                    id,
+                    parents.get(1..).unwrap_or_default(),
+                    false,
+                )?;
             }
             chain_ids = old.ids;
         }
@@ -361,7 +424,12 @@ pub fn extract(
     let mailmap = repo.open_mailmap();
     let mut st = match cp {
         Some(c) => State {
-            path_ids: c.paths.iter().enumerate().map(|(i, p)| (BString::from(p.path.as_str()), i as PathId)).collect(),
+            path_ids: c
+                .paths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (BString::from(p.path.as_str()), i as PathId))
+                .collect(),
             paths: c.paths,
             ids: Identities::new(mailmap, c.identities),
             tracker: c.tracker,
@@ -461,7 +529,8 @@ pub fn extract(
                             ema_rate = Some(ema_rate.map_or(r, |e| 0.7 * e + 0.3 * r));
                             rate_mark = (Instant::now(), done);
                         }
-                        let rate = ema_rate.unwrap_or(done as f64 / started.elapsed().as_secs_f64().max(1e-3));
+                        let rate = ema_rate
+                            .unwrap_or(done as f64 / started.elapsed().as_secs_f64().max(1e-3));
                         progress(&Progress {
                             phase: "diff",
                             done,
@@ -473,7 +542,16 @@ pub fn extract(
                     }
                     if last_cp.elapsed() >= opts.checkpoint_every {
                         sink.flush()?;
-                        save_checkpoint(state_dir, &snapshot(&st, &fingerprint, &branch, next, chain_ids[next as usize - 1]))?;
+                        save_checkpoint(
+                            state_dir,
+                            &snapshot(
+                                &st,
+                                &fingerprint,
+                                &branch,
+                                next,
+                                chain_ids[next as usize - 1],
+                            ),
+                        )?;
                         last_cp = Instant::now();
                     }
                     if cancel.load(Ordering::Relaxed) {
@@ -491,7 +569,13 @@ pub fn extract(
     run?;
 
     let steps_done_to = start_step + done as Step;
-    progress(&Progress { phase: "finish", done, total, steps_per_sec: 0.0, eta_secs: None });
+    progress(&Progress {
+        phase: "finish",
+        done,
+        total,
+        steps_per_sec: 0.0,
+        eta_secs: None,
+    });
 
     // Dimension tables.
     let tip_tree = repo.find_commit(tip)?.tree_id()?.detach();
@@ -501,7 +585,11 @@ pub fn extract(
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let facts = PathFacts { binary: p.binary, submodule: p.submodule, generated_hint: p.generated_hint };
+            let facts = PathFacts {
+                binary: p.binary,
+                submodule: p.submodule,
+                generated_hint: p.generated_hint,
+            };
             let (category, lang) = classifier.classify(&p.path, facts);
             PathRow {
                 path_id: i as PathId,
@@ -528,14 +616,30 @@ pub fn extract(
         })
         .collect();
     tags.sort_by(|a, b| (a.step, &a.name).cmp(&(b.step, &b.name)));
-    sink.finish(Dimensions { paths, authors, tags })?;
+    sink.finish(Dimensions {
+        paths,
+        authors,
+        tags,
+    })?;
     if steps_done_to > 0 {
-        save_checkpoint(state_dir, &snapshot(&st, &fingerprint, &branch, steps_done_to, chain_ids[steps_done_to as usize - 1]))?;
+        save_checkpoint(
+            state_dir,
+            &snapshot(
+                &st,
+                &fingerprint,
+                &branch,
+                steps_done_to,
+                chain_ids[steps_done_to as usize - 1],
+            ),
+        )?;
     }
 
     Ok(ExtractReport {
         branch,
-        head: chain_ids.get(steps_done_to.saturating_sub(1) as usize).map(|i| i.to_string()).unwrap_or_default(),
+        head: chain_ids
+            .get(steps_done_to.saturating_sub(1) as usize)
+            .map(|i| i.to_string())
+            .unwrap_or_default(),
         steps_total: steps_done_to,
         steps_new: done as u32,
         resumed,
@@ -548,7 +652,13 @@ pub fn extract(
     })
 }
 
-fn snapshot<'a>(st: &'a State, fingerprint: &str, branch: &str, next_step: Step, last: ObjectId) -> SnapshotRef<'a> {
+fn snapshot<'a>(
+    st: &'a State,
+    fingerprint: &str,
+    branch: &str,
+    next_step: Step,
+    last: ObjectId,
+) -> SnapshotRef<'a> {
     SnapshotRef {
         format: CHECKPOINT_FORMAT,
         fingerprint: fingerprint.to_string(),

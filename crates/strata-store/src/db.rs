@@ -88,12 +88,19 @@ pub fn sql_str(s: &str) -> String {
 }
 
 fn like_prefix(dir: &str) -> String {
-    let esc = dir.trim_matches('/').replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let esc = dir
+        .trim_matches('/')
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
     sql_str(&format!("{esc}/%"))
 }
 
 fn ids(list: &[u32]) -> String {
-    list.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+    list.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 impl Filters {
@@ -101,13 +108,30 @@ impl Filters {
     fn path_pred(&self) -> String {
         let mut p = vec!["TRUE".to_string()];
         if !self.exclude.is_empty() {
-            p.push(format!("p.category NOT IN ({})", self.exclude.iter().map(u8::to_string).collect::<Vec<_>>().join(",")));
+            p.push(format!(
+                "p.category NOT IN ({})",
+                self.exclude
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
         }
         if !self.langs.is_empty() {
-            p.push(format!("p.lang IN ({})", self.langs.iter().map(|l| sql_str(l)).collect::<Vec<_>>().join(",")));
+            p.push(format!(
+                "p.lang IN ({})",
+                self.langs
+                    .iter()
+                    .map(|l| sql_str(l))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
         }
         if !self.root.trim_matches('/').is_empty() {
-            p.push(format!("p.path LIKE {} ESCAPE '\\'", like_prefix(&self.root)));
+            p.push(format!(
+                "p.path LIKE {} ESCAPE '\\'",
+                like_prefix(&self.root)
+            ));
         }
         p.join(" AND ")
     }
@@ -122,7 +146,9 @@ impl Filters {
             ));
         }
         if self.hide_bots {
-            p.push(format!("s.author_id NOT IN (SELECT author_id FROM {schema}.authors WHERE is_bot)"));
+            p.push(format!(
+                "s.author_id NOT IN (SELECT author_id FROM {schema}.authors WHERE is_bot)"
+            ));
         }
         p.join(" AND ")
     }
@@ -149,15 +175,20 @@ impl Bins {
         let w = ((self.hi - self.lo) / f64::from(self.bins.max(1))).max(1e-9);
         let x = self.x_col();
         (
-            format!("CASE WHEN {x} < {lo} THEN -1 ELSE least(floor(({x} - {lo}) / {w}), {last})::INTEGER END",
-                lo = self.lo, last = self.bins.max(1) - 1),
+            format!(
+                "CASE WHEN {x} < {lo} THEN -1 ELSE least(floor(({x} - {lo}) / {w}), {last})::INTEGER END",
+                lo = self.lo,
+                last = self.bins.max(1) - 1
+            ),
             format!("{x} < {hi}", hi = self.hi),
         )
     }
 }
 
 pub fn ipc(conn: &Connection, sql: &str) -> anyhow::Result<Vec<u8>> {
-    let mut stmt = conn.prepare(sql).with_context(|| format!("preparing: {sql}"))?;
+    let mut stmt = conn
+        .prepare(sql)
+        .with_context(|| format!("preparing: {sql}"))?;
     let arrow = stmt.query_arrow([])?;
     let schema = arrow.get_schema();
     let mut buf = Vec::new();
@@ -172,7 +203,9 @@ pub fn ipc(conn: &Connection, sql: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 fn json_rows(conn: &Connection, sql: &str) -> anyhow::Result<Vec<Value>> {
-    let mut stmt = conn.prepare(sql).with_context(|| format!("preparing: {sql}"))?;
+    let mut stmt = conn
+        .prepare(sql)
+        .with_context(|| format!("preparing: {sql}"))?;
     let mut rows = stmt.query([])?;
     let names: Vec<String> = rows.as_ref().map(|s| s.column_names()).unwrap_or_default();
     let mut out = Vec::new();
@@ -211,10 +244,19 @@ fn to_json(v: duckdb::types::Value) -> Value {
 
 fn dir_fingerprint(dir: &Path) -> String {
     let mut parts: Vec<String> = Vec::new();
-    for table in ["steps", "changes", "keyframes", "paths.parquet", "authors.parquet"] {
+    for table in [
+        "steps",
+        "changes",
+        "keyframes",
+        "paths.parquet",
+        "authors.parquet",
+    ] {
         let p = dir.join(table);
         let mut entries: Vec<String> = match std::fs::read_dir(&p) {
-            Ok(rd) => rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect(),
+            Ok(rd) => rd
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect(),
             Err(_) => std::fs::metadata(&p)
                 .and_then(|m| m.modified())
                 .map(|t| vec![format!("{t:?}")])
@@ -228,7 +270,10 @@ fn dir_fingerprint(dir: &Path) -> String {
 
 fn glob_or_empty(dir: &Path, table: &str) -> Option<String> {
     let d = dir.join(table);
-    let has = std::fs::read_dir(&d).ok()?.flatten().any(|e| e.file_name().to_string_lossy().ends_with(".parquet"));
+    let has = std::fs::read_dir(&d)
+        .ok()?
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with(".parquet"));
     has.then(|| sql_str(&format!("{}/*.parquet", d.display())))
 }
 
@@ -236,8 +281,16 @@ impl Db {
     pub fn new(layout: Layout) -> anyhow::Result<Self> {
         let base = Connection::open_in_memory()?;
         let mem = std::env::var("STRATA_DUCKDB_MEMORY").unwrap_or_else(|_| "3GB".into());
-        base.execute_batch(&format!("SET memory_limit = {}; SET preserve_insertion_order = false;", sql_str(&mem)))?;
-        Ok(Self { base: Mutex::new(base), pool: Mutex::new(Vec::new()), loaded: Mutex::new(HashMap::new()), layout })
+        base.execute_batch(&format!(
+            "SET memory_limit = {}; SET preserve_insertion_order = false;",
+            sql_str(&mem)
+        ))?;
+        Ok(Self {
+            base: Mutex::new(base),
+            pool: Mutex::new(Vec::new()),
+            loaded: Mutex::new(HashMap::new()),
+            layout,
+        })
     }
 
     pub fn layout(&self) -> &Layout {
@@ -259,7 +312,11 @@ impl Db {
     }
 
     /// Run `f` with a pooled connection and the repo's schema name (loading/refreshing it first).
-    pub fn with<T>(&self, repo: &str, f: impl FnOnce(&Connection, &str) -> anyhow::Result<T>) -> anyhow::Result<T> {
+    pub fn with<T>(
+        &self,
+        repo: &str,
+        f: impl FnOnce(&Connection, &str) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
         let schema = self.ensure_loaded(repo)?;
         let conn = self.conn()?;
         let out = f(&conn, &schema);
@@ -275,14 +332,16 @@ impl Db {
         }
         let fp = dir_fingerprint(&dir);
         let mut loaded = self.loaded.lock().unwrap();
-        if let Some((schema, old)) = loaded.get(repo) {
-            if *old == fp {
-                return Ok(schema.clone());
-            }
+        if let Some((schema, old)) = loaded.get(repo)
+            && *old == fp
+        {
+            return Ok(schema.clone());
         }
         let schema = format!(
             "r_{}",
-            repo.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect::<String>()
+            repo.chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect::<String>()
         );
         let conn = self.base.lock().unwrap();
         let file = |name: &str| sql_str(&dir.join(name).display().to_string());
@@ -311,22 +370,34 @@ impl Db {
                 .split(';')
                 .find(|s| s.contains(&format!("CREATE TABLE {table} (")))
                 .unwrap_or_default()
-                .replace(&format!("CREATE TABLE {table} ("), &format!("CREATE TABLE {schema}.{table} ("));
+                .replace(
+                    &format!("CREATE TABLE {table} ("),
+                    &format!("CREATE TABLE {schema}.{table} ("),
+                );
             format!("{ddl};")
         };
         match &changes_src {
             Some(g) if changes_bytes <= MATERIALIZE_BYTES => {
-                sql += &format!("CREATE TABLE {schema}.changes AS SELECT * FROM read_parquet({g}) ORDER BY step;")
+                sql += &format!(
+                    "CREATE TABLE {schema}.changes AS SELECT * FROM read_parquet({g}) ORDER BY step;"
+                )
             }
-            Some(g) => sql += &format!("CREATE VIEW {schema}.changes AS SELECT * FROM read_parquet({g});"),
+            Some(g) => {
+                sql += &format!("CREATE VIEW {schema}.changes AS SELECT * FROM read_parquet({g});")
+            }
             None => sql += &empty("changes"),
         }
         for table in ["origin_deltas", "side_commits", "keyframes"] {
             match glob_or_empty(&dir, table) {
                 Some(g) if changes_bytes <= MATERIALIZE_BYTES => {
-                    sql += &format!("CREATE TABLE {schema}.{table} AS SELECT * FROM read_parquet({g});")
+                    sql += &format!(
+                        "CREATE TABLE {schema}.{table} AS SELECT * FROM read_parquet({g});"
+                    )
                 }
-                Some(g) => sql += &format!("CREATE VIEW {schema}.{table} AS SELECT * FROM read_parquet({g});"),
+                Some(g) => {
+                    sql +=
+                        &format!("CREATE VIEW {schema}.{table} AS SELECT * FROM read_parquet({g});")
+                }
                 None => sql += &empty(table),
             }
         }
@@ -335,7 +406,8 @@ impl Db {
              CREATE TABLE {schema}.canon AS SELECT a.author_id, a.canonical_id, c.name, c.email, a.is_bot
                FROM {schema}.authors a JOIN {schema}.authors c ON c.author_id = a.canonical_id;"
         );
-        conn.execute_batch(&sql).with_context(|| format!("loading repo {repo}"))?;
+        conn.execute_batch(&sql)
+            .with_context(|| format!("loading repo {repo}"))?;
         loaded.insert(repo.to_string(), (schema.clone(), fp));
         Ok(schema)
     }
@@ -343,7 +415,12 @@ impl Db {
     /// Per-step axis times (seconds, monotonic) and flags, for client-side axis mapping.
     pub fn axis(&self, repo: &str) -> anyhow::Result<Vec<u8>> {
         self.with(repo, |c, s| {
-            ipc(c, &format!("SELECT axis_time::DOUBLE AS t, flags, is_merge FROM {s}.steps ORDER BY step"))
+            ipc(
+                c,
+                &format!(
+                    "SELECT axis_time::DOUBLE AS t, flags, is_merge FROM {s}.steps ORDER BY step"
+                ),
+            )
         })
     }
 
@@ -420,7 +497,13 @@ impl Db {
     /// Stacked area series in long format: (bin, key, value) for size, (bin, key, adds, dels) for flow.
     /// Size rows are cumulative per key at the bins where the key changed; bin -1 is the baseline
     /// before `lo`. Clients forward-fill.
-    pub fn area(&self, repo: &str, f: &Filters, b: &Bins, q: &AreaQuery) -> anyhow::Result<Vec<u8>> {
+    pub fn area(
+        &self,
+        repo: &str,
+        f: &Filters,
+        b: &Bins,
+        q: &AreaQuery,
+    ) -> anyhow::Result<Vec<u8>> {
         self.with(repo, |c, s| {
             let (bin, below_hi) = b.bin_expr();
             let root = f.root.trim_matches('/');
@@ -553,7 +636,14 @@ impl Db {
     }
 
     /// Commits in [first, last] for a bin tooltip (largest first).
-    pub fn commits(&self, repo: &str, first: u32, last: u32, f: &Filters, limit: u32) -> anyhow::Result<Vec<Value>> {
+    pub fn commits(
+        &self,
+        repo: &str,
+        first: u32,
+        last: u32,
+        f: &Filters,
+        limit: u32,
+    ) -> anyhow::Result<Vec<Value>> {
         self.with(repo, |c, s| {
             json_rows(c, &format!(
                 "WITH ch AS (SELECT c.step, sum(c.{a})::BIGINT AS a, sum(c.{d})::BIGINT AS d
@@ -571,7 +661,12 @@ impl Db {
 
     /// Search commits by message, author or path. Returns matching steps and path ids.
     pub fn search(&self, repo: &str, q: &str, kind: &str, limit: u32) -> anyhow::Result<Value> {
-        let pat = sql_str(&format!("%{}%", q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
+        let pat = sql_str(&format!(
+            "%{}%",
+            q.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        ));
         self.with(repo, |c, s| {
             let (steps_sql, paths_sql) = match kind {
                 "author" => (

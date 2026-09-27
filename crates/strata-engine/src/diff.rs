@@ -29,7 +29,11 @@ pub struct DiffOptions {
 
 impl Default for DiffOptions {
     fn default() -> Self {
-        Self { max_diff_bytes: 16 << 20, survival_ws_ignore: true, rename_limit: 1000 }
+        Self {
+            max_diff_bytes: 16 << 20,
+            survival_ws_ignore: true,
+            rename_limit: 1000,
+        }
     }
 }
 
@@ -87,7 +91,9 @@ pub fn read_signature(sig: gix::actor::SignatureRef<'_>) -> Signature {
 }
 
 pub fn read_commit(repo: &gix::Repository, id: ObjectId) -> anyhow::Result<(CommitInfo, ObjectId)> {
-    let commit = repo.find_commit(id).with_context(|| format!("reading commit {id}"))?;
+    let commit = repo
+        .find_commit(id)
+        .with_context(|| format!("reading commit {id}"))?;
     let c = commit.decode()?;
     let info = CommitInfo {
         id,
@@ -133,7 +139,12 @@ fn hash_ignoring_ws(line: &[u8]) -> u64 {
 
 fn hunks_of(diff: &Diff) -> Vec<Hunk> {
     diff.hunks()
-        .map(|h| Hunk { b0: h.before.start, b1: h.before.end, a0: h.after.start, a1: h.after.end })
+        .map(|h| Hunk {
+            b0: h.before.start,
+            b1: h.before.end,
+            a0: h.after.start,
+            a1: h.after.end,
+        })
         .collect()
 }
 
@@ -142,7 +153,11 @@ fn line_diff(old: &[u8], new: &[u8]) -> (Vec<Hunk>, u32, u32) {
     let input = InternedInput::new(old, new);
     let mut diff = Diff::compute(Algorithm::Histogram, &input);
     diff.postprocess_lines(&input);
-    (hunks_of(&diff), diff.count_additions(), diff.count_removals())
+    (
+        hunks_of(&diff),
+        diff.count_additions(),
+        diff.count_removals(),
+    )
 }
 
 /// Same, but lines that differ only in whitespace compare equal (`git diff -w`).
@@ -152,13 +167,22 @@ fn ws_diff(old: &[u8], new: &[u8]) -> (Vec<Hunk>, u32, u32) {
     input.update_after(split_lines(new).map(hash_ignoring_ws));
     let mut diff = Diff::compute(Algorithm::Histogram, &input);
     diff.postprocess_no_heuristic(&input);
-    (hunks_of(&diff), diff.count_additions(), diff.count_removals())
+    (
+        hunks_of(&diff),
+        diff.count_additions(),
+        diff.count_removals(),
+    )
 }
 
 impl DiffWorker {
     pub fn new(repo: gix::Repository, opts: DiffOptions) -> anyhow::Result<Self> {
         let cache = repo.diff_resource_cache_for_tree_diff()?;
-        Ok(Self { repo, cache, state: Default::default(), opts })
+        Ok(Self {
+            repo,
+            cache,
+            state: Default::default(),
+            opts,
+        })
     }
 
     pub fn repo(&self) -> &gix::Repository {
@@ -166,7 +190,11 @@ impl DiffWorker {
     }
 
     fn blob(&self, id: ObjectId) -> anyhow::Result<Vec<u8>> {
-        Ok(self.repo.find_blob(id).with_context(|| format!("reading blob {id}"))?.take_data())
+        Ok(self
+            .repo
+            .find_blob(id)
+            .with_context(|| format!("reading blob {id}"))?
+            .take_data())
     }
 
     pub fn run(&mut self, step: Step, id: ObjectId) -> anyhow::Result<StepDiff> {
@@ -188,7 +216,10 @@ impl DiffWorker {
         let mut changes: Vec<Change> = Vec::new();
         let opts = TreeDiffOptions {
             location: Some(Location::Path),
-            rewrites: Some(gix::diff::Rewrites { limit: self.opts.rename_limit, ..Default::default() }),
+            rewrites: Some(gix::diff::Rewrites {
+                limit: self.opts.rename_limit,
+                ..Default::default()
+            }),
         };
         gix::diff::tree_with_rewrites(
             TreeRefIter::from_bytes(&old_tree.data, old_tree.id.kind()),
@@ -211,45 +242,119 @@ impl DiffWorker {
                 files.push(f);
             }
         }
-        Ok(StepDiff { step, commit, files })
+        Ok(StepDiff {
+            step,
+            commit,
+            files,
+        })
     }
 
     fn file_diff(&self, change: Change) -> anyhow::Result<Option<FileDiff>> {
         use gix::objs::tree::EntryMode;
         let content = |mode: EntryMode, id: ObjectId| -> anyhow::Result<Option<Vec<u8>>> {
-            Ok(if mode.is_blob_or_symlink() { Some(self.blob(id)?) } else { None })
+            Ok(if mode.is_blob_or_symlink() {
+                Some(self.blob(id)?)
+            } else {
+                None
+            })
         };
         let (path, old_path, kind, old, new, submodule) = match change {
-            Change::Addition { location, entry_mode, id, .. } => {
+            Change::Addition {
+                location,
+                entry_mode,
+                id,
+                ..
+            } => {
                 if entry_mode.is_tree() {
                     return Ok(None);
                 }
-                (location, None, kind::ADD, None, content(entry_mode, id)?, entry_mode.is_commit())
+                (
+                    location,
+                    None,
+                    kind::ADD,
+                    None,
+                    content(entry_mode, id)?,
+                    entry_mode.is_commit(),
+                )
             }
-            Change::Deletion { location, entry_mode, id, .. } => {
+            Change::Deletion {
+                location,
+                entry_mode,
+                id,
+                ..
+            } => {
                 if entry_mode.is_tree() {
                     return Ok(None);
                 }
-                (location, None, kind::DELETE, content(entry_mode, id)?, None, entry_mode.is_commit())
+                (
+                    location,
+                    None,
+                    kind::DELETE,
+                    content(entry_mode, id)?,
+                    None,
+                    entry_mode.is_commit(),
+                )
             }
-            Change::Modification { location, previous_entry_mode, previous_id, entry_mode, id } => {
+            Change::Modification {
+                location,
+                previous_entry_mode,
+                previous_id,
+                entry_mode,
+                id,
+            } => {
                 if entry_mode.is_tree() && previous_entry_mode.is_tree() {
                     return Ok(None);
                 }
-                let old = if previous_entry_mode.is_tree() { None } else { content(previous_entry_mode, previous_id)? };
-                let new = if entry_mode.is_tree() { None } else { content(entry_mode, id)? };
-                (location, None, kind::MODIFY, old, new, entry_mode.is_commit())
+                let old = if previous_entry_mode.is_tree() {
+                    None
+                } else {
+                    content(previous_entry_mode, previous_id)?
+                };
+                let new = if entry_mode.is_tree() {
+                    None
+                } else {
+                    content(entry_mode, id)?
+                };
+                (
+                    location,
+                    None,
+                    kind::MODIFY,
+                    old,
+                    new,
+                    entry_mode.is_commit(),
+                )
             }
-            Change::Rewrite { source_location, source_entry_mode, source_id, entry_mode, id, location, .. } => {
+            Change::Rewrite {
+                source_location,
+                source_entry_mode,
+                source_id,
+                entry_mode,
+                id,
+                location,
+                ..
+            } => {
                 if entry_mode.is_tree() {
                     return Ok(None);
                 }
                 let old = content(source_entry_mode, source_id)?;
-                (location, Some(source_location), kind::RENAME, old, content(entry_mode, id)?, entry_mode.is_commit())
+                (
+                    location,
+                    Some(source_location),
+                    kind::RENAME,
+                    old,
+                    content(entry_mode, id)?,
+                    entry_mode.is_commit(),
+                )
             }
         };
 
-        let mut f = FileDiff { path, old_path, kind, submodule, ..Default::default() };
+        let mut f = FileDiff {
+            path,
+            old_path,
+            kind,
+            submodule,
+            ..Default::default()
+        };
         let old_bytes = old.as_deref().unwrap_or_default();
         let new_bytes = new.as_deref().unwrap_or_default();
         f.bytes_after = new_bytes.len() as u64;
@@ -260,10 +365,19 @@ impl DiffWorker {
             // Like `git diff --numstat`, binary changes count no lines; a text file that became
             // binary (or vice versa) still loses (gains) its lines in the tracker.
             f.binary = is_binary(new_bytes);
-            f.old_lines = if is_binary(old_bytes) { 0 } else { count_lines(old_bytes) };
+            f.old_lines = if is_binary(old_bytes) {
+                0
+            } else {
+                count_lines(old_bytes)
+            };
             if !f.binary && !new_bytes.is_empty() {
                 f.new_lines = count_lines(new_bytes);
-                f.hunks = vec![Hunk { b0: 0, b1: 0, a0: 0, a1: f.new_lines }];
+                f.hunks = vec![Hunk {
+                    b0: 0,
+                    b1: 0,
+                    a0: 0,
+                    a1: f.new_lines,
+                }];
             }
             return Ok(Some(f));
         }
@@ -280,7 +394,16 @@ impl DiffWorker {
             f.adds_ws = f.adds;
             f.dels_ws = f.dels;
             let common = o.min(n);
-            f.hunks = if o == n { vec![] } else { vec![Hunk { b0: common, b1: o, a0: common, a1: n }] };
+            f.hunks = if o == n {
+                vec![]
+            } else {
+                vec![Hunk {
+                    b0: common,
+                    b1: o,
+                    a0: common,
+                    a1: n,
+                }]
+            };
             return Ok(Some(f));
         }
         if old_bytes == new_bytes {
@@ -292,7 +415,11 @@ impl DiffWorker {
         f.dels = dels;
         f.adds_ws = adds_ws;
         f.dels_ws = dels_ws;
-        f.hunks = if self.opts.survival_ws_ignore { ws } else { strict };
+        f.hunks = if self.opts.survival_ws_ignore {
+            ws
+        } else {
+            strict
+        };
         Ok(Some(f))
     }
 }

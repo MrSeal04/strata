@@ -25,7 +25,11 @@ pub struct JobProgress {
 }
 
 /// Run a git command, forwarding its progress lines ("Receiving objects:  42% ...") to `progress`.
-fn git_with_progress(args: &[&str], cwd: Option<&Path>, progress: &mut dyn FnMut(&JobProgress)) -> anyhow::Result<()> {
+fn git_with_progress(
+    args: &[&str],
+    cwd: Option<&Path>,
+    progress: &mut dyn FnMut(&JobProgress),
+) -> anyhow::Result<()> {
     let mut cmd = Command::new("git");
     cmd.args(args).stdout(Stdio::null()).stderr(Stdio::piped());
     if let Some(d) = cwd {
@@ -98,7 +102,12 @@ fn read_until_any(r: &mut impl BufRead, out: &mut Vec<u8>) -> std::io::Result<us
 }
 
 /// The git directory to read: the path itself for local repos, a bare mirror for URLs.
-pub fn prepare_git_dir(layout: &Layout, source: &Source, fetch: bool, progress: &mut dyn FnMut(&JobProgress)) -> anyhow::Result<PathBuf> {
+pub fn prepare_git_dir(
+    layout: &Layout,
+    source: &Source,
+    fetch: bool,
+    progress: &mut dyn FnMut(&JobProgress),
+) -> anyhow::Result<PathBuf> {
     match source {
         Source::Path { path } => Ok(path.clone()),
         Source::Url { url } => {
@@ -106,7 +115,14 @@ pub fn prepare_git_dir(layout: &Layout, source: &Source, fetch: bool, progress: 
             if dir.join("HEAD").exists() {
                 if fetch {
                     git_with_progress(
-                        &["fetch", "--progress", "--prune", "--tags", "origin", "+refs/heads/*:refs/heads/*"],
+                        &[
+                            "fetch",
+                            "--progress",
+                            "--prune",
+                            "--tags",
+                            "origin",
+                            "+refs/heads/*:refs/heads/*",
+                        ],
                         Some(&dir),
                         progress,
                     )?;
@@ -115,7 +131,11 @@ pub fn prepare_git_dir(layout: &Layout, source: &Source, fetch: bool, progress: 
                 std::fs::create_dir_all(dir.parent().unwrap())?;
                 let tmp = dir.with_extension("partial");
                 let _ = std::fs::remove_dir_all(&tmp);
-                git_with_progress(&["clone", "--bare", "--progress", url, &tmp.to_string_lossy()], None, progress)?;
+                git_with_progress(
+                    &["clone", "--bare", "--progress", url, &tmp.to_string_lossy()],
+                    None,
+                    progress,
+                )?;
                 std::fs::rename(&tmp, &dir)?;
             }
             Ok(dir)

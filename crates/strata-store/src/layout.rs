@@ -7,7 +7,13 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const TABLES: &[&str] = &["steps", "changes", "origin_deltas", "side_commits", "keyframes"];
+pub const TABLES: &[&str] = &[
+    "steps",
+    "changes",
+    "origin_deltas",
+    "side_commits",
+    "keyframes",
+];
 
 #[derive(Clone, Debug)]
 pub struct Layout {
@@ -32,13 +38,18 @@ impl Source {
         }
         let looks_remote = s.contains("://") || (s.contains('@') && s.contains(':'));
         anyhow::ensure!(looks_remote, "{s}: not a directory or a git URL");
-        Ok(Source::Url { url: s.trim_end_matches('/').to_string() })
+        Ok(Source::Url {
+            url: s.trim_end_matches('/').to_string(),
+        })
     }
 
     /// Short human name: the directory or repository name.
     pub fn name(&self) -> String {
         let raw = match self {
-            Source::Path { path } => path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            Source::Path { path } => path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             Source::Url { url } => url.rsplit(['/', ':']).next().unwrap_or(url).to_string(),
         };
         raw.trim_end_matches(".git").to_string()
@@ -55,7 +66,13 @@ impl Source {
         let name: String = self
             .name()
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         format!("{name}-{hex}")
     }
@@ -89,7 +106,9 @@ impl Layout {
         if let Some(h) = std::env::var_os("STRATA_HOME") {
             return PathBuf::from(h);
         }
-        dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".cache")).join("strata")
+        dirs::cache_dir()
+            .unwrap_or_else(|| PathBuf::from(".cache"))
+            .join("strata")
     }
 
     pub fn repos_dir(&self) -> PathBuf {
@@ -107,14 +126,23 @@ impl Layout {
         let clean: String = stripped
             .trim_end_matches(".git")
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || "-_./".contains(c) { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "-_./".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
-        self.root.join("clones").join(format!("{}.git", clean.replace("..", "_")))
+        self.root
+            .join("clones")
+            .join(format!("{}.git", clean.replace("..", "_")))
     }
 
     pub fn read_meta(&self, id: &str) -> anyhow::Result<RepoMeta> {
         let path = self.repo_dir(id).join("meta.json");
-        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
         Ok(serde_json::from_str(&text)?)
     }
 
@@ -149,9 +177,17 @@ mod tests {
         let s = Source::parse("https://github.com/torvalds/linux.git").unwrap();
         assert_eq!(s.name(), "linux");
         assert!(s.id().starts_with("linux-"));
-        assert_eq!(s.id(), Source::parse("https://github.com/torvalds/linux").unwrap().id());
+        assert_eq!(
+            s.id(),
+            Source::parse("https://github.com/torvalds/linux")
+                .unwrap()
+                .id()
+        );
         let l = Layout::new("/c".into());
-        assert_eq!(l.clone_dir("https://github.com/torvalds/linux"), PathBuf::from("/c/clones/github.com/torvalds/linux.git"));
+        assert_eq!(
+            l.clone_dir("https://github.com/torvalds/linux"),
+            PathBuf::from("/c/clones/github.com/torvalds/linux.git")
+        );
         assert_eq!(
             l.clone_dir("ssh://git@git.example.com:2222/you/project.git"),
             PathBuf::from("/c/clones/git.example.com_2222/you/project.git")

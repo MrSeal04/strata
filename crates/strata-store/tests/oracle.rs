@@ -14,31 +14,57 @@ fn fixtures() -> &'static Path {
     DIR.get_or_init(|| {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
         let out = std::env::temp_dir().join(format!("strata-fixtures-{}", std::process::id()));
-        let st = Command::new("bash").arg(root.join("make.sh")).arg(&out).output().expect("run make.sh");
-        assert!(st.status.success(), "make.sh failed: {}", String::from_utf8_lossy(&st.stderr));
+        let st = Command::new("bash")
+            .arg(root.join("make.sh"))
+            .arg(&out)
+            .output()
+            .expect("run make.sh");
+        assert!(
+            st.status.success(),
+            "make.sh failed: {}",
+            String::from_utf8_lossy(&st.stderr)
+        );
         out
     })
 }
 
 fn git(repo: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").arg("-C").arg(repo).args(args).output().expect("git");
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).unwrap()
 }
 
 /// Per first-parent commit: (adds, dels) summed over text files, from `git log --numstat`.
 fn git_numstat(repo: &Path, ws: bool) -> Vec<(String, u64, u64)> {
-    let mut args = vec!["log", "--first-parent", "-M", "--diff-algorithm=histogram", "--numstat", "--format=@%H", "--reverse"];
+    let mut args = vec![
+        "log",
+        "--first-parent",
+        "-M",
+        "--diff-algorithm=histogram",
+        "--numstat",
+        "--format=@%H",
+        "--reverse",
+    ];
     if ws {
         args.push("-w");
     }
     // git counts a submodule gitlink as a one-line "Subproject commit <sha>" file; strata
     // counts submodules as 0 lines, so leave them out of the oracle.
-    let gitlinks: std::collections::HashSet<String> = git(repo, &["log", "--all", "--raw", "--format="])
-        .lines()
-        .filter(|l| l.starts_with(':') && l.contains("160000"))
-        .filter_map(|l| l.split('\t').next_back().map(str::to_string))
-        .collect();
+    let gitlinks: std::collections::HashSet<String> =
+        git(repo, &["log", "--all", "--raw", "--format="])
+            .lines()
+            .filter(|l| l.starts_with(':') && l.contains("160000"))
+            .filter_map(|l| l.split('\t').next_back().map(str::to_string))
+            .collect();
     let mut out: Vec<(String, u64, u64)> = Vec::new();
     for line in git(repo, &args).lines() {
         if let Some(sha) = line.strip_prefix('@') {
@@ -59,8 +85,19 @@ fn git_numstat(repo: &Path, ws: bool) -> Vec<(String, u64, u64)> {
 
 fn extract(layout: &Layout, repo: &Path) -> String {
     let src = Source::parse(repo.to_str().unwrap()).unwrap();
-    let opts = ExtractOptions { threads: 3, ..Default::default() };
-    let meta = extract_source(layout, &src, &opts, false, &AtomicBool::new(false), &mut |_| {}).unwrap();
+    let opts = ExtractOptions {
+        threads: 3,
+        ..Default::default()
+    };
+    let meta = extract_source(
+        layout,
+        &src,
+        &opts,
+        false,
+        &AtomicBool::new(false),
+        &mut |_| {},
+    )
+    .unwrap();
     meta.id
 }
 
@@ -96,7 +133,13 @@ fn check_repo(name: &str) {
         .map(|l| {
             let (meta, path) = l.split_once('\t').unwrap();
             let oid = meta.split_whitespace().nth(2).unwrap();
-            let content = Command::new("git").arg("-C").arg(&repo).args(["cat-file", "blob", oid]).output().unwrap().stdout;
+            let content = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["cat-file", "blob", oid])
+                .output()
+                .unwrap()
+                .stdout;
             let lines = if content[..content.len().min(8000)].contains(&0) {
                 0
             } else {
@@ -117,7 +160,10 @@ fn check_repo(name: &str) {
             Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
         })
         .unwrap();
-    assert_eq!(state, head_lines, "{name}: final state differs from HEAD tree");
+    assert_eq!(
+        state, head_lines,
+        "{name}: final state differs from HEAD tree"
+    );
 
     // 3. Survival deltas net to the surviving line count; size (line_delta) agrees too.
     let (deltas, size): (i64, i64) = db
@@ -130,19 +176,41 @@ fn check_repo(name: &str) {
         })
         .unwrap();
     let total: i64 = head_lines.values().map(|&v| i64::from(v)).sum();
-    assert_eq!(deltas, total, "{name}: origin deltas don't net to surviving lines");
+    assert_eq!(
+        deltas, total,
+        "{name}: origin deltas don't net to surviving lines"
+    );
     assert_eq!(size, total, "{name}: line_delta doesn't sum to repo size");
 
     // 4. The query endpoints run.
-    let f = Filters { exclude: vec![4, 5, 6, 7], ..Default::default() };
+    let f = Filters {
+        exclude: vec![4, 5, 6, 7],
+        ..Default::default()
+    };
     db.summary(&id).unwrap();
     db.axis(&id).unwrap();
     db.paths(&id).unwrap();
-    let bins = strata_store::Bins { axis: strata_store::Axis::Index, lo: 0.0, hi: 100.0, bins: 10 };
+    let bins = strata_store::Bins {
+        axis: strata_store::Axis::Index,
+        lo: 0.0,
+        hi: 100.0,
+        bins: 10,
+    };
     db.bars(&id, &f, &bins).unwrap();
-    for slice in [strata_store::Slice::Dir, strata_store::Slice::Lang, strata_store::Slice::Author, strata_store::Slice::Cohort] {
+    for slice in [
+        strata_store::Slice::Dir,
+        strata_store::Slice::Lang,
+        strata_store::Slice::Author,
+        strata_store::Slice::Cohort,
+    ] {
         for mode in [strata_store::AreaMode::Size, strata_store::AreaMode::Flow] {
-            let q = strata_store::AreaQuery { slice, mode, depth: 1, top: 5, unit: "month".into() };
+            let q = strata_store::AreaQuery {
+                slice,
+                mode,
+                depth: 1,
+                top: 5,
+                unit: "month".into(),
+            };
             db.area(&id, &f, &bins, &q).unwrap();
         }
     }
@@ -181,7 +249,15 @@ fn incremental_resume_matches_full() {
     let src_repo = fixtures().join("linear");
     let work = tempfile::tempdir().unwrap();
     let repo = work.path().join("linear");
-    git(work.path(), &["clone", "-q", src_repo.to_str().unwrap(), repo.to_str().unwrap()]);
+    git(
+        work.path(),
+        &[
+            "clone",
+            "-q",
+            src_repo.to_str().unwrap(),
+            repo.to_str().unwrap(),
+        ],
+    );
     // Extract a prefix of history, then the rest incrementally.
     git(&repo, &["reset", "-q", "--hard", "HEAD~3"]);
     let home = tempfile::tempdir().unwrap();

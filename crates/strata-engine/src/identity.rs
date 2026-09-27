@@ -32,7 +32,11 @@ impl Identities {
             .enumerate()
             .map(|(i, r)| ((r.name.clone(), r.email.to_lowercase()), i as AuthorId))
             .collect();
-        Self { mailmap, by_key, raw }
+        Self {
+            mailmap,
+            by_key,
+            raw,
+        }
     }
 
     pub fn raw(&self) -> &[RawIdentity] {
@@ -52,7 +56,11 @@ impl Identities {
             Some(&id) => id,
             None => {
                 let id = self.raw.len() as AuthorId;
-                self.raw.push(RawIdentity { name: key.0.clone(), email, commits: 0 });
+                self.raw.push(RawIdentity {
+                    name: key.0.clone(),
+                    email,
+                    commits: 0,
+                });
                 self.by_key.insert(key, id);
                 id
             }
@@ -70,8 +78,22 @@ impl Identities {
 }
 
 const GENERIC_NAMES: &[&str] = &[
-    "root", "unknown", "admin", "administrator", "user", "ubuntu", "debian", "localhost", "none",
-    "nobody", "your name", "github", "git", "test", "dev", "developer",
+    "root",
+    "unknown",
+    "admin",
+    "administrator",
+    "user",
+    "ubuntu",
+    "debian",
+    "localhost",
+    "none",
+    "nobody",
+    "your name",
+    "github",
+    "git",
+    "test",
+    "dev",
+    "developer",
 ];
 
 const BOT_PATTERNS: &str = r"(?i)(\[bot\]|^dependabot|^renovate|^github-actions|^pre-commit-ci|^greenkeeper|^snyk-bot|^weblate|semantic-release-bot|^allcontributors|^imgbot|^codecov|^mergify|^copilot-swe-agent|^gitlab-bot|^forgejo-actions|^mend bolt|^deepsource-autofix|^autofix-ci|^transifex|^crowdin|^translate-bot|noreply\+bot)";
@@ -120,7 +142,9 @@ pub fn finalize(raw: &[RawIdentity], cfg: &IdentityConfig) -> Vec<AuthorRow> {
     let n = raw.len();
     let mut parent: Vec<usize> = (0..n).collect();
     let no_merge = |r: &RawIdentity| {
-        cfg.no_merge.iter().any(|k| k.eq_ignore_ascii_case(&r.email) || k == &r.name)
+        cfg.no_merge
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(&r.email) || k == &r.name)
     };
 
     let mut first_by_key: FxHashMap<String, usize> = FxHashMap::default();
@@ -128,7 +152,10 @@ pub fn finalize(raw: &[RawIdentity], cfg: &IdentityConfig) -> Vec<AuthorRow> {
         if no_merge(r) {
             continue;
         }
-        let keys = [email_key(&r.email), normalized_name(&r.name).map(|n| format!("name:{n}"))];
+        let keys = [
+            email_key(&r.email),
+            normalized_name(&r.name).map(|n| format!("name:{n}")),
+        ];
         for key in keys.into_iter().flatten() {
             match first_by_key.get(&key) {
                 Some(&j) => union(&mut parent, i, j),
@@ -143,7 +170,11 @@ pub fn finalize(raw: &[RawIdentity], cfg: &IdentityConfig) -> Vec<AuthorRow> {
         let members: Vec<usize> = raw
             .iter()
             .enumerate()
-            .filter(|(_, r)| group.iter().any(|k| k.eq_ignore_ascii_case(&r.email) || k == &r.name))
+            .filter(|(_, r)| {
+                group
+                    .iter()
+                    .any(|k| k.eq_ignore_ascii_case(&r.email) || k == &r.name)
+            })
             .map(|(i, _)| i)
             .collect();
         for w in members.windows(2) {
@@ -168,7 +199,8 @@ pub fn finalize(raw: &[RawIdentity], cfg: &IdentityConfig) -> Vec<AuthorRow> {
             let root = find(&mut parent, i);
             let canon = best[&root];
             let listed = |list: &[String]| {
-                list.iter().any(|k| k.eq_ignore_ascii_case(&r.email) || k == &r.name)
+                list.iter()
+                    .any(|k| k.eq_ignore_ascii_case(&r.email) || k == &r.name)
             };
             let is_bot = if listed(&cfg.humans) {
                 false
@@ -191,7 +223,11 @@ mod tests {
     use super::*;
 
     fn raw(name: &str, email: &str, commits: u32) -> RawIdentity {
-        RawIdentity { name: name.into(), email: email.into(), commits }
+        RawIdentity {
+            name: name.into(),
+            email: email.into(),
+            commits,
+        }
     }
 
     #[test]
@@ -204,19 +240,30 @@ mod tests {
             raw("octocat", "octocat@users.noreply.github.com", 1),
             raw("root", "root@localhost", 1),
             raw("root", "root@otherhost", 1),
-            raw("dependabot[bot]", "49699333+dependabot[bot]@users.noreply.github.com", 5),
+            raw(
+                "dependabot[bot]",
+                "49699333+dependabot[bot]@users.noreply.github.com",
+                5,
+            ),
         ];
         let rows = finalize(&ids, &IdentityConfig::default());
         let canon: Vec<u32> = rows.iter().map(|r| r.canonical_id).collect();
         assert_eq!(&canon[..3], &[0, 0, 0], "email + accent-folded name merge");
         assert_eq!(canon[3], canon[4], "github noreply forms merge");
-        assert_ne!(canon[5], canon[6], "generic single-token names never merge by name");
+        assert_ne!(
+            canon[5], canon[6],
+            "generic single-token names never merge by name"
+        );
         assert!(rows[7].is_bot && !rows[0].is_bot);
     }
 
     #[test]
     fn config_overrides() {
-        let ids = vec![raw("A Person", "a@x", 1), raw("Other Name", "b@y", 1), raw("ci", "ci@x", 1)];
+        let ids = vec![
+            raw("A Person", "a@x", 1),
+            raw("Other Name", "b@y", 1),
+            raw("ci", "ci@x", 1),
+        ];
         let cfg = IdentityConfig {
             merge: vec![vec!["a@x".into(), "Other Name".into()]],
             bots: vec!["ci@x".into()],

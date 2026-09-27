@@ -44,7 +44,15 @@ pub mod category {
     pub const BINARY: u8 = 7;
     pub const SUBMODULE: u8 = 8;
     pub const NAMES: [&str; 9] = [
-        "source", "docs", "data", "notebook", "lockfile", "vendored", "generated", "binary", "submodule",
+        "source",
+        "docs",
+        "data",
+        "notebook",
+        "lockfile",
+        "vendored",
+        "generated",
+        "binary",
+        "submodule",
     ];
 }
 

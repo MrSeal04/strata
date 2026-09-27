@@ -47,12 +47,20 @@ pub struct FileState {
 
 impl FileState {
     pub fn mean_origin_time(&self) -> i64 {
-        if self.lines == 0 { 0 } else { self.sum_time / i64::from(self.lines) }
+        if self.lines == 0 {
+            0
+        } else {
+            self.sum_time / i64::from(self.lines)
+        }
     }
 
     /// (top author, share of lines). Share is 0 for empty files.
     pub fn top_author(&self) -> (AuthorId, f32) {
-        match self.authors.iter().max_by_key(|(a, n)| (*n, std::cmp::Reverse(*a))) {
+        match self
+            .authors
+            .iter()
+            .max_by_key(|(a, n)| (*n, std::cmp::Reverse(*a)))
+        {
             Some(&(a, n)) if self.lines > 0 => (a, n as f32 / self.lines as f32),
             _ => (u32::MAX, 0.0),
         }
@@ -77,13 +85,16 @@ impl DeltaAcc {
     pub fn drain_into(&mut self, step: Step, path_id: PathId, out: &mut Vec<OriginDeltaRow>) {
         let mut rows: Vec<_> = self.map.drain().filter(|(_, d)| *d != 0).collect();
         rows.sort_unstable_by_key(|((m, a), _)| (*m, *a));
-        out.extend(rows.into_iter().map(|((cohort, author_id), delta)| OriginDeltaRow {
-            step,
-            path_id,
-            cohort,
-            author_id,
-            delta,
-        }));
+        out.extend(
+            rows.into_iter()
+                .map(|((cohort, author_id), delta)| OriginDeltaRow {
+                    step,
+                    path_id,
+                    cohort,
+                    author_id,
+                    delta,
+                }),
+        );
     }
 }
 
@@ -128,7 +139,11 @@ fn push_run(out: &mut Vec<Run>, run: Run) {
 
 impl Tracker {
     pub fn new_origin(&mut self, time: i64, author: AuthorId) -> OriginId {
-        self.origins.push(Origin { time, author, month: month_index(time) });
+        self.origins.push(Origin {
+            time,
+            author,
+            month: month_index(time),
+        });
         (self.origins.len() - 1) as OriginId
     }
 
@@ -182,7 +197,10 @@ impl Tracker {
         }
         let old_runs = std::mem::take(&mut st.runs);
         let old_total: u32 = old_runs.iter().map(|r| r.len).sum();
-        let net_removed: i64 = hunks.iter().map(|h| i64::from(h.b1 - h.b0) - i64::from(h.a1 - h.a0)).sum();
+        let net_removed: i64 = hunks
+            .iter()
+            .map(|h| i64::from(h.b1 - h.b0) - i64::from(h.a1 - h.a0))
+            .sum();
         let consistent = i64::from(old_total) - net_removed == i64::from(new_lines)
             && hunks.last().is_none_or(|h| h.b1 <= old_total);
 
@@ -191,7 +209,12 @@ impl Tracker {
             for run in old_runs {
                 st.account(&self.origins, run, -1, acc);
             }
-            let whole = [Hunk { b0: 0, b1: 0, a0: 0, a1: new_lines }];
+            let whole = [Hunk {
+                b0: 0,
+                b1: 0,
+                a0: 0,
+                a1: new_lines,
+            }];
             self.splice(&mut st, &[], &whole, origin_of, acc);
         } else {
             self.splice(&mut st, &old_runs, hunks, origin_of, acc);
@@ -218,12 +241,20 @@ impl Tracker {
         let mut pos = 0u32; // old line index at the cursor
 
         // Consume `n` old lines from the cursor; keep them (copy) or drop them (account -1).
-        let mut consume = |n: u32, keep: bool, out: &mut Vec<Run>, st: &mut FileState, ri: &mut usize, off: &mut u32| {
+        let mut consume = |n: u32,
+                           keep: bool,
+                           out: &mut Vec<Run>,
+                           st: &mut FileState,
+                           ri: &mut usize,
+                           off: &mut u32| {
             let mut left = n;
             while left > 0 {
                 let run = old[*ri];
                 let take = (run.len - *off).min(left);
-                let piece = Run { origin: run.origin, len: take };
+                let piece = Run {
+                    origin: run.origin,
+                    len: take,
+                };
                 if keep {
                     push_run(out, piece);
                 } else {
@@ -245,7 +276,13 @@ impl Tracker {
             pos = h.b1;
             inserts.clear();
             for line in h.a0..h.a1 {
-                push_run(&mut inserts, Run { origin: origin_of(line), len: 1 });
+                push_run(
+                    &mut inserts,
+                    Run {
+                        origin: origin_of(line),
+                        len: 1,
+                    },
+                );
             }
             for &run in &inserts {
                 push_run(&mut out, run);
@@ -279,7 +316,14 @@ impl Tracker {
     /// Record a binary file (no line tracking; any previous text lines leave the repo).
     pub fn set_binary(&mut self, path: PathId, bytes: u64, acc: &mut DeltaAcc) {
         self.delete(path, acc);
-        self.files.insert(path, FileState { bytes, binary: true, ..Default::default() });
+        self.files.insert(
+            path,
+            FileState {
+                bytes,
+                binary: true,
+                ..Default::default()
+            },
+        );
     }
 
     pub fn keyframe(&self, step: Step) -> Vec<KeyframeRow> {
@@ -336,7 +380,10 @@ mod tests {
     }
 
     fn expand(st: &FileState) -> Vec<u32> {
-        st.runs.iter().flat_map(|r| std::iter::repeat_n(r.origin, r.len as usize)).collect()
+        st.runs
+            .iter()
+            .flat_map(|r| std::iter::repeat_n(r.origin, r.len as usize))
+            .collect()
     }
 
     /// Random valid hunk list against a file of `old_len` lines.
@@ -350,7 +397,12 @@ mod tests {
                 if b1 == b0 && ins == 0 {
                     continue;
                 }
-                hunks.push(Hunk { b0, b1, a0, a1: a0 + ins });
+                hunks.push(Hunk {
+                    b0,
+                    b1,
+                    a0,
+                    a1: a0 + ins,
+                });
                 a = a0 + ins;
                 b = b1;
             }
@@ -380,7 +432,7 @@ mod tests {
                 }
                 let o = t.new_origin(100 * (s as i64 + 1), (s % 2) as u32);
                 let oo = if s % 2 == 0 { o } else { o0 };
-                let origin_of = move |line: u32| if line % 3 == 0 { oo } else { o };
+                let origin_of = move |line: u32| if line.is_multiple_of(3) { oo } else { o };
                 let new_len = (model.len() as i64 + a_shift) as u32;
                 prop_assert!(t.apply(1, &fixed, new_len, 0, &origin_of, &mut acc));
                 model = naive_apply(&model, &fixed, origin_of);
@@ -402,9 +454,33 @@ mod tests {
         let b = t.new_origin(40 * 86_400 * 31, 2);
         let mut acc = DeltaAcc::default();
         let mut rows = Vec::new();
-        t.apply(7, &[Hunk { b0: 0, b1: 0, a0: 0, a1: 10 }], 10, 100, &|_| a, &mut acc);
+        t.apply(
+            7,
+            &[Hunk {
+                b0: 0,
+                b1: 0,
+                a0: 0,
+                a1: 10,
+            }],
+            10,
+            100,
+            &|_| a,
+            &mut acc,
+        );
         acc.drain_into(0, 7, &mut rows);
-        t.apply(7, &[Hunk { b0: 2, b1: 5, a0: 2, a1: 4 }], 9, 90, &|_| b, &mut acc);
+        t.apply(
+            7,
+            &[Hunk {
+                b0: 2,
+                b1: 5,
+                a0: 2,
+                a1: 4,
+            }],
+            9,
+            90,
+            &|_| b,
+            &mut acc,
+        );
         acc.drain_into(1, 7, &mut rows);
         let mut net: FxHashMap<(u16, u32), i64> = FxHashMap::default();
         for r in &rows {
@@ -425,7 +501,19 @@ mod tests {
         let a = t.new_origin(0, 1);
         let mut acc = DeltaAcc::default();
         // File unknown to the tracker but the diff claims 5 old lines.
-        let ok = t.apply(3, &[Hunk { b0: 0, b1: 5, a0: 0, a1: 2 }], 2, 0, &|_| a, &mut acc);
+        let ok = t.apply(
+            3,
+            &[Hunk {
+                b0: 0,
+                b1: 5,
+                a0: 0,
+                a1: 2,
+            }],
+            2,
+            0,
+            &|_| a,
+            &mut acc,
+        );
         assert!(!ok);
         assert_eq!(t.get(3).unwrap().lines, 2);
     }
