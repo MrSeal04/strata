@@ -103,7 +103,6 @@ export class TreeView extends View {
   private beams: Beam[] = [];
   private lastActorStep = -1;
   private layoutSel: HTMLSelectElement;
-  exporting = false;
 
   constructor(private app: App) {
     super("tree", "File tree");
