@@ -119,6 +119,7 @@ node tools/shot.mjs URL out.png [w] [h] [waitMs] [--dark] [--selector CSS] [--ev
 ```
 
 Dev builds link the prebuilt `libduckdb` (`DUCKDB_DOWNLOAD_LIB=1` in `.cargo/config.toml`).
-`make bundled` compiles DuckDB into the binary instead: one self-contained executable, with no
-`libduckdb.so` needed at runtime. It took 27 minutes on the desktop with 3 compile jobs; each
+`make bundled` compiles DuckDB into the binary instead, producing `target/strata-bundled`: one
+self-contained 69 MB executable (DuckDB's debug info is stripped; unstripped it is over 1 GB),
+with no `libduckdb.so` needed at runtime. It took 27 minutes on the desktop with 3 compile jobs; each
 DuckDB compiler process uses 1–1.5 GB, so keep `CARGO_BUILD_JOBS` low on a busy machine.
