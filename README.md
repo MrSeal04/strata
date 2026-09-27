@@ -6,7 +6,7 @@ the history back in a browser dashboard with four linked views:
 
 - **Evolving treemap**: every file sized by lines, laid out stably so files grow in place.
   Color by language, recent activity, line age or top author, and click to zoom into a folder.
-- **File tree**: a radial tidy tree (default), force-directed (Gource-style), sunburst or
+- **File tree**: force-directed (Gource-style, the default), a radial tidy tree, sunburst or
   icicle. Big folders collapse to fit, and author "actors" fly to the files they touch.
 - **Stacked area**: repository size by directory, language, author (surviving lines) or
   *when lines were written* (survival cohorts), or added/deleted lines per period.

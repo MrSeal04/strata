@@ -53,7 +53,7 @@ try {
         a.player.play();
         await new Promise((r) => setTimeout(r, 800));
         a.player.pause();
-        for (const treeLayout of ["force", "sunburst", "icicle", "radial"]) {
+        for (const treeLayout of ["radial", "sunburst", "icicle", "force"]) {
           a.store.setSettings({ treeLayout });
           await new Promise((r) => setTimeout(r, 200));
         }

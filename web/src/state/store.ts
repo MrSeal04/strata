@@ -5,7 +5,7 @@ export type PlayMode = "fixed" | "commits" | "calendar";
 export type BarScale = "linear" | "sqrt" | "log";
 export type AreaSlice = "dir" | "lang" | "author" | "cohort";
 export type AreaMode = "size" | "flow";
-export type TreeLayout = "radial" | "force" | "sunburst" | "icicle";
+export type TreeLayout = "force" | "radial" | "sunburst" | "icicle";
 export type ColorBy = "lang" | "heat" | "age" | "author";
 
 export interface Settings {
@@ -53,7 +53,7 @@ export const DEFAULT_SETTINGS: Settings = {
   areaMode: "size",
   areaDepth: 1,
   cohortUnit: "auto",
-  treeLayout: "radial",
+  treeLayout: "force",
   colorBy: "lang",
   actors: false,
   gravatar: false,
@@ -170,11 +170,32 @@ export function initialState(): State {
   };
 }
 
+/**
+ * Saved settings keep only values that differ from the defaults, so a changed default reaches
+ * everyone who never picked that setting. Version 1 (no `v`) saved every value.
+ */
+const SETTINGS_VERSION = 2;
+
+export function settingsToSave(s: Settings): Record<string, unknown> {
+  const out: Record<string, unknown> = { v: SETTINGS_VERSION };
+  for (const k of Object.keys(s) as (keyof Settings)[]) {
+    if (JSON.stringify(s[k]) !== JSON.stringify(DEFAULT_SETTINGS[k])) out[k] = s[k];
+  }
+  return out;
+}
+
+export function settingsFromSaved(saved: Record<string, unknown>): Partial<Settings> {
+  const { v, ...rest } = saved;
+  // Version 1 saved every value, so its "radial" tree layout is the old default, not a choice.
+  if (v === undefined && rest.treeLayout === "radial") delete rest.treeLayout;
+  return rest as Partial<Settings>;
+}
+
 /** Per-viewer convenience: remember settings per repo in localStorage (never required). */
 export function loadSettings(repo: string): Partial<Settings> {
   try {
     const raw = localStorage.getItem(`strata:settings:${repo}`) ?? localStorage.getItem("strata:settings");
-    return raw ? (JSON.parse(raw) as Partial<Settings>) : {};
+    return raw ? settingsFromSaved(JSON.parse(raw) as Record<string, unknown>) : {};
   } catch {
     return {};
   }
@@ -182,8 +203,9 @@ export function loadSettings(repo: string): Partial<Settings> {
 
 export function saveSettings(repo: string, s: Settings) {
   try {
-    localStorage.setItem(`strata:settings:${repo}`, JSON.stringify(s));
-    localStorage.setItem("strata:settings", JSON.stringify(s));
+    const text = JSON.stringify(settingsToSave(s));
+    localStorage.setItem(`strata:settings:${repo}`, text);
+    localStorage.setItem("strata:settings", text);
   } catch {
     /* storage unavailable: settings just don't persist */
   }

@@ -78,8 +78,8 @@ function largestFile(v: VNode): TNode | null {
 }
 
 const LAYOUT_LABEL: Record<TreeLayout, string> = {
-  radial: "radial tree",
   force: "force-directed",
+  radial: "radial tree",
   sunburst: "sunburst",
   icicle: "icicle",
 };
