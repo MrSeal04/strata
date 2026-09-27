@@ -140,12 +140,15 @@ export class TreemapView extends View {
     this.panes = this.paneSpecs().map((spec) => {
       const display = spec.tree.find(s.root) ?? spec.tree.root;
       const root = hierarchy<TNode>(display, (n) => (n.children ? stableChildren(n) : null)).sum((n) => (n.file && !n.file.binary ? n.file.lines : 0));
+      // Padding only where it's visible: at Linux scale fixed gaps would eat every small file and
+      // leave gray folder backgrounds. Small folders pack their files edge to edge.
+      const area = (n: HierarchyRectangularNode<TNode>) => (n.x1 - n.x0) * (n.y1 - n.y0);
       treemap<TNode>()
         .tile(treemapBinary)
         .size([spec.w, this.height - top(spec)])
-        .paddingOuter(2)
-        .paddingInner(1)
-        .paddingTop((n) => (n.depth > 0 && n.data.isDir && n.x1 - n.x0 > 60 && n.y1 - n.y0 > 36 ? 15 : n.depth === 0 ? 2 : 1))(root);
+        .paddingOuter((n) => (n.depth === 0 ? 2 : area(n) > 2500 ? 2 : area(n) > 400 ? 1 : 0))
+        .paddingInner((n) => (area(n) > 1200 ? 1 : 0))
+        .paddingTop((n) => (n.depth > 0 && n.data.isDir && n.x1 - n.x0 > 60 && n.y1 - n.y0 > 36 ? 15 : n.depth === 0 ? 2 : area(n) > 400 ? 1 : 0))(root);
       const r = root as LNode;
       r.each((n) => {
         n.x0 += spec.x;
@@ -153,7 +156,8 @@ export class TreemapView extends View {
         n.y0 += top(spec);
         n.y1 += top(spec);
       });
-      const nodes = r.descendants().filter((n) => n.x1 - n.x0 >= 0.3 && n.y1 - n.y0 >= 0.3 && (n.value ?? 0) > 0);
+      // Sub-pixel files still paint (antialiased), so dense folders blend into their files' colors.
+      const nodes = r.descendants().filter((n) => (n.x1 - n.x0) * (n.y1 - n.y0) >= 0.02 && (n.value ?? 0) > 0);
       return { ...spec, root: r, nodes };
     });
     this.layoutKey = this.currentKey();

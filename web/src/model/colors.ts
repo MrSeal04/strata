@@ -12,7 +12,7 @@ export class Categorical {
   assign(rankedKeys: Iterable<string>) {
     const used = new Set(this.slots.values());
     for (const k of rankedKeys) {
-      if (this.slots.has(k) || k === "(other)") continue;
+      if (this.slots.has(k) || k === "(other)" || k === "Other") continue;
       if (used.size >= 8) break;
       let slot = 0;
       while (used.has(slot)) slot++;

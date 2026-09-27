@@ -44,7 +44,8 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
   colorMaps.lang.reset();
   colorMaps.author.reset();
   colorMaps.dir.reset();
-  colorMaps.lang.assign(metaRes.summary.langs.map((l) => l.lang));
+  // "Other" (unrecognized extensions) stays neutral rather than taking a slot.
+  colorMaps.lang.assign(metaRes.summary.langs.map((l) => l.lang).filter((l) => l !== "Other"));
 
   const app: App = {
     repo,
