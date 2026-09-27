@@ -2,7 +2,7 @@
 PREFIX ?= $(HOME)/.local
 CARGO  ?= cargo
 
-.PHONY: all web build bundled check test smoke fixtures install dev clean
+.PHONY: all web build bundled deb check test smoke fixtures install dev clean
 
 all: build
 
@@ -24,6 +24,10 @@ bundled: web
 		$(CARGO) build --release -p strata-cli --features strata-store/bundled
 	strip --strip-debug -o target/strata-bundled target/bundled/release/strata
 	@echo "built target/strata-bundled (self-contained; DuckDB's debug info stripped)"
+
+# Debian package of the self-contained binary: target/strata_<version>_<arch>.deb.
+deb: bundled
+	tools/make-deb.sh
 
 check: web/node_modules
 	$(CARGO) fmt --check

@@ -33,7 +33,9 @@ strata ssh://git@git.example.com:2222/you/project.git
 Re-running is incremental: only commits since the last run are processed.
 
 Or skip the build: each [release](https://github.com/MrSeal04/strata/releases) ships a
-self-contained Linux x86-64 binary with DuckDB compiled in (no `libduckdb.so` needed).
+self-contained Linux x86-64 binary with DuckDB compiled in (no `libduckdb.so` needed), and the
+same binary as a `.deb`. The `.deb` is also published to an apt repository on the Forgejo server,
+so `apt upgrade` picks up new releases; the release notes have the one-time setup.
 
 ## CLI
 
@@ -126,3 +128,5 @@ Dev builds link the prebuilt `libduckdb` (`DUCKDB_DOWNLOAD_LIB=1` in `.cargo/con
 self-contained 69 MB executable (DuckDB's debug info is stripped; unstripped it is over 1 GB),
 with no `libduckdb.so` needed at runtime. It took 27 minutes on the desktop with 3 compile jobs; each
 DuckDB compiler process uses 1–1.5 GB, so keep `CARGO_BUILD_JOBS` low on a busy machine.
+`make deb` packages it as `target/strata_<version>_amd64.deb` (`tools/make-deb.sh`), with the
+library dependencies derived by `dpkg-shlibdeps`.
