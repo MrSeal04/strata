@@ -23,7 +23,10 @@ use crate::tracker::{DeltaAcc, OriginId, Tracker};
 use crate::walk::{self, Landing};
 
 const CHECKPOINT_FORMAT: u32 = 2;
-pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Version of the extracted data, part of the checkpoint fingerprint: bump it whenever extraction
+/// output changes, so old caches re-extract instead of mixing semantics. It is independent of
+/// the release version, so a release that leaves extraction alone keeps every cache.
+pub const ENGINE_VERSION: &str = "0.1.0";
 
 #[derive(Clone, Debug)]
 pub struct ExtractOptions {
