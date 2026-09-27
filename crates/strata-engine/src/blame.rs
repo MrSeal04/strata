@@ -21,9 +21,20 @@ struct Slots {
     cv: std::sync::Condvar,
 }
 
-static SLOTS: std::sync::LazyLock<Slots> = std::sync::LazyLock::new(|| Slots {
-    free: std::sync::Mutex::new(std::thread::available_parallelism().map_or(4, |n| n.get())),
-    cv: std::sync::Condvar::new(),
+/// Half the CPUs by default ($STRATA_BLAME_JOBS overrides): on Linux a single blame can take
+/// ~350 MB, so a dozen at once is gigabytes.
+static SLOTS: std::sync::LazyLock<Slots> = std::sync::LazyLock::new(|| {
+    let default = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .div_ceil(2);
+    let n = std::env::var("STRATA_BLAME_JOBS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default);
+    Slots {
+        free: std::sync::Mutex::new(n.max(1)),
+        cv: std::sync::Condvar::new(),
+    }
 });
 
 struct SlotGuard;
