@@ -1,14 +1,10 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! strata storage: cache layout, the Parquet sink the engine writes into, and DuckDB queries.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod db;
+pub mod layout;
+pub mod pipeline;
+pub mod sink;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use db::{AreaMode, AreaQuery, Axis, Bins, Db, Filters, Slice};
+pub use layout::{Layout, RepoMeta, Source};
+pub use sink::ParquetSink;

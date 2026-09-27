@@ -1,6 +1,24 @@
 [package]
 name = "strata-store"
-version = "0.1.0"
-edition = "2024"
+description = "Parquet storage and DuckDB queries for strata"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Compile DuckDB from source and link it statically (slow, but no libduckdb.so at runtime).
+bundled = ["duckdb/bundled"]
 
 [dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+strata-engine = { path = "../strata-engine" }
+duckdb = "1.10505"
+arrow = { version = "58", default-features = false, features = ["ipc"] }
+sha2 = "0.10"
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"

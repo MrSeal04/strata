@@ -253,12 +253,14 @@ fn process_step(
         if f.approx {
             row.flags |= step_flags::APPROX;
         }
+        // A rename destination is a new path: its lines arrive with this row (the source row
+        // already subtracted them), so measure `before` prior to attaching the moved state.
+        let before = st.tracker.get(path_id).map_or(0, |s| s.lines);
         let mut old_path_id = NO_PATH;
         if let Some((old_id, state)) = moved.remove(&i) {
             old_path_id = old_id;
             st.tracker.put(path_id, state);
         }
-        let before = st.tracker.get(path_id).map_or(0, |s| s.lines);
 
         if f.kind == kind::DELETE {
             st.tracker.delete(path_id, &mut acc);
