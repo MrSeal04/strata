@@ -123,9 +123,17 @@ export class TreemapView extends View {
     super("treemap", "Files by size");
     this.gl = GlRects.create();
     if (this.gl) {
-      this.gl.canvas.style.display = "none";
-      this.gl.canvas.setAttribute("aria-hidden", "true");
-      this.body.insertBefore(this.gl.canvas, this.canvas);
+      const glCanvas = this.gl.canvas;
+      glCanvas.style.display = "none";
+      glCanvas.setAttribute("aria-hidden", "true");
+      this.body.insertBefore(glCanvas, this.canvas);
+      // GPU reset or too many contexts: fall back to Canvas2D for good.
+      glCanvas.addEventListener("webglcontextlost", () => {
+        glCanvas.remove();
+        this.gl = null;
+        this.glActive = false;
+        this.invalidate();
+      });
     }
     this.modeSel = h("select", { "aria-label": "Compare layout" }, h("option", { value: "overlay", text: "B, colored by change" }), h("option", { value: "side", text: "A and B side by side" }));
     this.modeSel.addEventListener("change", () => {
