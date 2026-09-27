@@ -14,6 +14,38 @@ pub fn counters() -> (u64, u64) {
         BLAME_SHORTCUTS.load(Ordering::Relaxed),
     )
 }
+
+/// Blame processes allowed at once across all workers (each can be large on big histories).
+struct Slots {
+    free: std::sync::Mutex<usize>,
+    cv: std::sync::Condvar,
+}
+
+static SLOTS: std::sync::LazyLock<Slots> = std::sync::LazyLock::new(|| Slots {
+    free: std::sync::Mutex::new(std::thread::available_parallelism().map_or(4, |n| n.get())),
+    cv: std::sync::Condvar::new(),
+});
+
+struct SlotGuard;
+
+fn acquire() -> SlotGuard {
+    let mut free = SLOTS.free.lock().unwrap();
+    while *free == 0 {
+        free = SLOTS.cv.wait(free).unwrap();
+    }
+    *free -= 1;
+    SlotGuard
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        *SLOTS.free.lock().unwrap() += 1;
+        SLOTS.cv.notify_one();
+    }
+}
+
+/// A blame slower than this is abandoned (the lines fall back to the merge's author).
+const BLAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 use std::path::Path;
 use std::process::Command;
 
@@ -69,15 +101,38 @@ pub fn blame_added(
     cmd.arg(format!("{first_parent}..{merge}"))
         .arg("--")
         .arg(path_os);
-    let out = cmd.output().context("running git blame")?;
-    if !out.status.success() {
-        bail!(
-            "git blame {}: {}",
-            path.as_bstr(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+    let _slot = acquire();
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("running git blame")?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut stdout, &mut buf).map(|_| buf)
+    });
+    let deadline = std::time::Instant::now() + BLAME_TIMEOUT;
+    let mut nap = std::time::Duration::from_millis(1);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("git blame {} timed out", path.as_bstr());
+        }
+        std::thread::sleep(nap);
+        nap = (nap * 2).min(std::time::Duration::from_millis(40));
+    };
+    let out = reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("blame reader panicked"))??;
+    if !status.success() {
+        bail!("git blame {} failed ({status})", path.as_bstr());
     }
-    parse_incremental(&out.stdout)
+    parse_incremental(&out)
 }
 
 #[derive(Default)]

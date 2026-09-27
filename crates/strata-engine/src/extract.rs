@@ -2,7 +2,7 @@
 //! order through the tracker into the sink, checkpoint periodically, resume incrementally.
 
 use std::collections::BTreeMap;
-use std::io::{BufReader, BufWriter};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -121,19 +121,54 @@ fn checkpoint_path(state_dir: &Path) -> PathBuf {
     state_dir.join("checkpoint.bin")
 }
 
+/// Format 1: format 2 without the landing map (read so upgrades resume instead of restarting).
+#[derive(Deserialize)]
+struct CheckpointV1 {
+    format: u32,
+    fingerprint: String,
+    branch: String,
+    next_step: Step,
+    last_sha: String,
+    axis_max: i64,
+    first_time: i64,
+    paths: Vec<PathMeta>,
+    identities: Vec<RawIdentity>,
+    tracker: Tracker,
+    rows_since_keyframe: u64,
+}
+
 fn load_checkpoint(state_dir: &Path) -> anyhow::Result<Option<Checkpoint>> {
     let path = checkpoint_path(state_dir);
     if !path.exists() {
         return Ok(None);
     }
-    let f = std::fs::File::open(&path)?;
-    let mut r = BufReader::new(zstd::Decoder::new(f)?);
-    match bincode::serde::decode_from_std_read::<Checkpoint, _, _>(
-        &mut r,
-        bincode::config::standard(),
-    ) {
-        Ok(cp) if cp.format == CHECKPOINT_FORMAT => Ok(Some(cp)),
-        _ => Ok(None), // unreadable or old format: start over
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(
+        &mut zstd::Decoder::new(std::fs::File::open(&path)?)?,
+        &mut raw,
+    )?;
+    let cfg = bincode::config::standard();
+    if let Ok((cp, _)) = bincode::serde::decode_from_slice::<Checkpoint, _>(&raw, cfg) {
+        if cp.format == CHECKPOINT_FORMAT {
+            return Ok(Some(cp));
+        }
+    }
+    match bincode::serde::decode_from_slice::<CheckpointV1, _>(&raw, cfg) {
+        Ok((v1, _)) if v1.format == 1 => Ok(Some(Checkpoint {
+            format: CHECKPOINT_FORMAT,
+            fingerprint: v1.fingerprint,
+            branch: v1.branch,
+            next_step: v1.next_step,
+            last_sha: v1.last_sha,
+            axis_max: v1.axis_max,
+            first_time: v1.first_time,
+            paths: v1.paths,
+            identities: v1.identities,
+            tracker: v1.tracker,
+            rows_since_keyframe: v1.rows_since_keyframe,
+            landing: Vec::new(), // rebuilt by walking the extracted history
+        })),
+        _ => Ok(None), // unreadable: start over
     }
 }
 
@@ -784,4 +819,25 @@ fn save_checkpoint(state_dir: &Path, cp: &SnapshotRef<'_>) -> anyhow::Result<()>
     }
     std::fs::rename(&tmp, &path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// `STRATA_CHECKPOINT_DIR=<dir with checkpoint.bin> cargo test -p strata-engine -- --ignored`
+    #[test]
+    #[ignore]
+    fn loads_an_external_checkpoint() {
+        let dir = std::env::var("STRATA_CHECKPOINT_DIR").expect("set STRATA_CHECKPOINT_DIR");
+        let cp = super::load_checkpoint(std::path::Path::new(&dir))
+            .unwrap()
+            .expect("checkpoint decodes");
+        eprintln!(
+            "next_step={} paths={} identities={} landing={}",
+            cp.next_step,
+            cp.paths.len(),
+            cp.identities.len(),
+            cp.landing.len()
+        );
+        assert!(cp.next_step > 0);
+    }
 }

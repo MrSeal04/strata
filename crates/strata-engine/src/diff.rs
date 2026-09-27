@@ -351,65 +351,82 @@ impl DiffWorker {
         Ok(touched)
     }
 
-    /// In-process blame for the common case: the side commits that touched a file form one
-    /// unbroken chain of versions ending in `final_id`. Replays their diffs (whitespace-insensitive,
-    /// like `git blame -w`) from the chain's first version, whose lines stay "boundary".
-    /// Returns None when the history isn't such a chain (the caller falls back to git blame).
+    /// In-process blame over the side branch: replays every side commit's edit to the file
+    /// (whitespace-insensitive, like `git blame -w`), memoizing line origins per file version
+    /// (blob id), so side branches with their own merges work too. Versions from outside the side
+    /// branch start as "boundary". Returns the origins of `final_id`, or None when that version
+    /// can't be reached (the caller falls back to git blame).
     fn replay_chain(
         &self,
         touches: &[Touch],
         final_id: ObjectId,
     ) -> anyhow::Result<Option<Vec<Option<usize>>>> {
-        // Order by content continuity: each touch's old blob is the previous touch's new blob.
         let produced: rustc_hash::FxHashSet<ObjectId> =
             touches.iter().filter_map(|t| t.new).collect();
-        let starts: Vec<&Touch> = touches
-            .iter()
-            .filter(|t| t.old.is_none_or(|o| !produced.contains(&o)))
-            .collect();
-        if starts.len() != 1 {
+        if !produced.contains(&final_id) {
             return Ok(None);
         }
-        let mut chain = vec![starts[0]];
-        while chain.len() < touches.len() {
-            let Some(cur) = chain.last().unwrap().new else {
-                return Ok(None);
-            };
-            let next: Vec<&Touch> = touches.iter().filter(|t| t.old == Some(cur)).collect();
-            if next.len() != 1 {
-                return Ok(None);
+        let mut blobs: rustc_hash::FxHashMap<ObjectId, Vec<u8>> = Default::default();
+        let mut memo: rustc_hash::FxHashMap<ObjectId, Vec<Option<usize>>> = Default::default();
+        let mut done = vec![false; touches.len()];
+        loop {
+            let mut progress = false;
+            for (i, t) in touches.iter().enumerate() {
+                if done[i] {
+                    continue;
+                }
+                let Some(new_id) = t.new else {
+                    done[i] = true;
+                    progress = true;
+                    continue;
+                };
+                if memo.contains_key(&new_id) {
+                    // Same content reached another way (cherry-pick, identical edit): keep the first.
+                    done[i] = true;
+                    progress = true;
+                    continue;
+                }
+                let old_origins: Vec<Option<usize>> = match t.old {
+                    None => Vec::new(),
+                    Some(o) => match memo.get(&o) {
+                        Some(v) => v.clone(),
+                        None if !produced.contains(&o) => {
+                            if !blobs.contains_key(&o) {
+                                blobs.insert(o, self.blob(o)?);
+                            }
+                            vec![None; count_lines(&blobs[&o]) as usize]
+                        }
+                        None => continue, // wait for the edit that produces this version
+                    },
+                };
+                for id in [t.old, Some(new_id)].into_iter().flatten() {
+                    if !blobs.contains_key(&id) {
+                        blobs.insert(id, self.blob(id)?);
+                    }
+                }
+                let old: &[u8] = t.old.map_or(&[][..], |o| &blobs[&o]);
+                let new: &[u8] = &blobs[&new_id];
+                if is_binary(old) || is_binary(new) {
+                    return Ok(None);
+                }
+                let (hunks, _, _) = ws_diff(old, new);
+                let mut out: Vec<Option<usize>> = Vec::with_capacity(count_lines(new) as usize);
+                let mut pos = 0usize;
+                for h in &hunks {
+                    out.extend_from_slice(old_origins.get(pos..h.b0 as usize).unwrap_or_default());
+                    out.extend(std::iter::repeat_n(Some(t.side), (h.a1 - h.a0) as usize));
+                    pos = h.b1 as usize;
+                }
+                out.extend_from_slice(old_origins.get(pos..).unwrap_or_default());
+                memo.insert(new_id, out);
+                done[i] = true;
+                progress = true;
             }
-            chain.push(next[0]);
-        }
-        if chain.last().unwrap().new != Some(final_id) {
-            return Ok(None);
-        }
-        // Replay: origin per line (None = older than the side branch).
-        let mut origins: Vec<Option<usize>> = match chain[0].old {
-            Some(id) => vec![None; count_lines(&self.blob(id)?) as usize],
-            None => Vec::new(),
-        };
-        for t in &chain {
-            let old = match t.old {
-                Some(id) => self.blob(id)?,
-                None => Vec::new(),
-            };
-            let new = self.blob(t.new.expect("chain links have a new blob"))?;
-            if is_binary(&old) || is_binary(&new) {
-                return Ok(None);
+            if !progress || done.iter().all(|d| *d) {
+                break;
             }
-            let (hunks, _, _) = ws_diff(&old, &new);
-            let mut out: Vec<Option<usize>> = Vec::with_capacity(count_lines(&new) as usize);
-            let mut pos = 0usize;
-            for h in &hunks {
-                out.extend_from_slice(origins.get(pos..h.b0 as usize).unwrap_or_default());
-                out.extend(std::iter::repeat_n(Some(t.side), (h.a1 - h.a0) as usize));
-                pos = h.b1 as usize;
-            }
-            out.extend_from_slice(origins.get(pos..).unwrap_or_default());
-            origins = out;
         }
-        Ok(Some(origins))
+        Ok(memo.remove(&final_id))
     }
 
     /// Per-line origins -> runs.
@@ -511,7 +528,8 @@ impl DiffWorker {
             .iter()
             .filter_map(|p| Some(self.repo.find_commit(*p).ok()?.tree_id().ok()?.detach()))
             .collect();
-        for f in files.iter_mut() {
+        let mut need_blame: Vec<usize> = Vec::new();
+        for (idx, f) in files.iter_mut().enumerate() {
             if f.binary || f.submodule || f.approx || !f.hunks.iter().any(|h| h.a1 > h.a0) {
                 continue;
             }
@@ -534,16 +552,48 @@ impl DiffWorker {
                 }
                 // No side commit changed it: the merge itself wrote these lines.
                 (None, None) if f.kind != crate::model::kind::RENAME => {}
-                _ => match crate::blame::blame_added(
-                    &git_dir,
-                    commit.id,
-                    commit.parents[0],
-                    &f.path,
-                    &f.hunks,
-                ) {
-                    Ok(runs) => f.blame = Some(runs),
+                _ => need_blame.push(idx),
+            }
+        }
+        // The rest go through `git blame`, several at a time (one slow merge would otherwise
+        // hold the whole in-order pipeline).
+        if !need_blame.is_empty() {
+            let parent = commit.parents[0];
+            let per = need_blame.len().div_ceil(need_blame.len().min(6));
+            let chunks: Vec<&[usize]> = need_blame.chunks(per.max(1)).collect();
+            let files_ref: &[FileDiff] = files;
+            let results: Vec<(usize, anyhow::Result<Vec<crate::blame::BlameRun>>)> =
+                std::thread::scope(|s| {
+                    let handles: Vec<_> = chunks
+                        .iter()
+                        .map(|chunk| {
+                            let git_dir = &git_dir;
+                            s.spawn(move || {
+                                chunk
+                                    .iter()
+                                    .map(|&i| {
+                                        let f = &files_ref[i];
+                                        (
+                                            i,
+                                            crate::blame::blame_added(
+                                                git_dir, commit.id, parent, &f.path, &f.hunks,
+                                            ),
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .flat_map(|h| h.join().unwrap_or_default())
+                        .collect()
+                });
+            for (i, r) in results {
+                match r {
+                    Ok(runs) => files[i].blame = Some(runs),
                     Err(e) => tracing::debug!("merge blame fell back to the merger: {e:#}"),
-                },
+                }
             }
         }
         Ok(())
