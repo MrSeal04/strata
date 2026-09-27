@@ -353,3 +353,36 @@ fn incremental_resume_matches_full() {
     assert_eq!(meta.last_run["steps_new"], 0);
     assert_eq!(meta.steps, 6);
 }
+
+#[test]
+fn shallow_clone_starts_with_an_import_step() {
+    let work = tempfile::tempdir().unwrap();
+    let repo = work.path().join("shallow");
+    let src = format!("file://{}", fixtures().join("linear").display());
+    let out = Command::new("git")
+        .args(["clone", "-q", "--depth", "3", &src])
+        .arg(&repo)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let home = tempfile::tempdir().unwrap();
+    let layout = Layout::new(home.path().to_path_buf());
+    let id = extract(&layout, &repo);
+    let db = Db::new(layout.clone()).unwrap();
+    let (steps, flags0, lines): (u32, u8, i64) = db
+        .with(&id, |c, s| {
+            Ok(c.query_row(
+                &format!(
+                    "SELECT (SELECT count(*) FROM {s}.steps)::UINTEGER, (SELECT flags FROM {s}.steps WHERE step = 0),
+                            (SELECT sum(line_delta) FROM {s}.changes)::BIGINT"
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(steps, 3);
+    assert_eq!(flags0 & 5, 5, "first step flagged IMPORT | SHALLOW_ROOT");
+    // HEAD of `linear` has 12 + 7 + 1 lines.
+    assert_eq!(lines, 20);
+}

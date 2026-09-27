@@ -58,11 +58,10 @@ pub fn first_parent_chain(
             resumed = true;
             break;
         }
+        // A missing commit is the boundary of a shallow clone: history starts after it.
+        let Ok(c) = repo.find_commit(id) else { break };
         ids.push(id);
-        cur = match repo.find_commit(id) {
-            Ok(c) => c.parent_ids().next().map(|p| p.detach()),
-            Err(_) => None, // shallow boundary
-        };
+        cur = c.parent_ids().next().map(|p| p.detach());
     }
     ids.reverse();
     Ok(Chain { ids, resumed })
