@@ -32,6 +32,9 @@ strata ssh://git@git.example.com:2222/you/project.git
 
 Re-running is incremental: only commits since the last run are processed.
 
+Or skip the build: each [release](https://github.com/MrSeal04/strata/releases) ships a
+self-contained Linux x86-64 binary with DuckDB compiled in (no `libduckdb.so` needed).
+
 ## CLI
 
 | Command | What it does |
@@ -98,7 +101,7 @@ and each one is a toggle in the filter row.
 
 | Repo | First-parent commits | Extract | Peak memory (anon) | Cache | Slowest query p95 |
 |---|---|---|---|---|---|
-| myrepo | 422 | 2.1 s (debug build) | n/a | small | n/a |
+| strata (this repo) | 34 | 0.18 s | 57 MB (RSS) | <0.1 MB | 35 ms (area by directory) |
 | git/git | 24,344 | 25.6 s | ~770 MB | 10.8 MB | 47 ms (message search) |
 | torvalds/linux | 77,194 | ~36 min (+ ~30 min clone) | 1.0–1.6 GB | 227 MB | see below |
 
