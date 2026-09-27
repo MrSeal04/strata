@@ -97,7 +97,7 @@ fn extract(layout: &Layout, repo: &Path) -> String {
         &AtomicBool::new(false),
         &mut |_| {},
     )
-    .unwrap();
+    .unwrap_or_else(|e| panic!("extracting {}: {e:#}", repo.display()));
     meta.id
 }
 
