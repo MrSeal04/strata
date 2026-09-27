@@ -1,0 +1,27 @@
+[package]
+name = "strata-engine"
+description = "Git history extraction for strata: first-parent walk, diffs, line-origin tracking"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+gix = { version = "0.88", default-features = false, features = ["max-performance-safe", "basic", "mailmap", "sha1", "parallel", "anyhow"] }
+crossbeam-channel = "0.5"
+smallvec = { version = "1", features = ["serde", "union"] }
+bstr = "1"
+regex = "1"
+globset = "0.4"
+rustc-hash = "2"
+zstd = "0.14"
+bincode = { version = "2", features = ["serde"] }
+toml = "1.1.6"
+unicode-normalization = "0.1.25"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"

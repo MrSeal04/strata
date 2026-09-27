@@ -1,0 +1,7 @@
+[env]
+# Link the prebuilt libduckdb (downloaded once into target/duckdb-download) instead of compiling
+# DuckDB's C++ from source. Build with `--features strata-store/bundled` for a self-contained binary.
+DUCKDB_DOWNLOAD_LIB = "1"
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN:$ORIGIN/deps:$ORIGIN/../lib/strata"]
