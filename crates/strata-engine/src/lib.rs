@@ -1,5 +1,6 @@
 //! strata extraction engine: turns a git history into per-step change, survival and state rows.
 
+pub mod blame;
 pub mod classify;
 pub mod config;
 pub mod diff;

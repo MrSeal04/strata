@@ -25,6 +25,11 @@ pub struct DiffOptions {
     /// Track survival with whitespace-insensitive alignment (a reformat doesn't make code "new").
     pub survival_ws_ignore: bool,
     pub rename_limit: usize,
+    /// Attribute lines a merge adds to the side-branch commits that wrote them (ranged blame).
+    /// Off = credit the merge commit's author.
+    pub merge_blame: bool,
+    /// Merges adding more lines than this fall back to merger attribution (bounds the cost).
+    pub blame_max_lines: u32,
 }
 
 impl Default for DiffOptions {
@@ -33,6 +38,8 @@ impl Default for DiffOptions {
             max_diff_bytes: 16 << 20,
             survival_ws_ignore: true,
             rename_limit: 1000,
+            merge_blame: true,
+            blame_max_lines: 400_000,
         }
     }
 }
@@ -73,6 +80,8 @@ pub struct FileDiff {
     pub dels_ws: u32,
     /// Hunks the tracker applies (whitespace-insensitive or strict, per `DiffOptions`).
     pub hunks: Vec<Hunk>,
+    /// Merge steps: who wrote the added lines (see `blame`).
+    pub blame: Option<Vec<crate::blame::BlameRun>>,
 }
 
 #[derive(Debug)]
@@ -242,11 +251,43 @@ impl DiffWorker {
                 files.push(f);
             }
         }
+        if self.opts.merge_blame && commit.parents.len() > 1 && !commit.shallow_root {
+            self.attribute_merge(&commit, &mut files);
+        }
         Ok(StepDiff {
             step,
             commit,
             files,
         })
+    }
+
+    /// Blame the lines this merge adds against its first parent, file by file.
+    fn attribute_merge(&self, commit: &CommitInfo, files: &mut [FileDiff]) {
+        let added: u64 = files
+            .iter()
+            .filter(|f| !f.binary && !f.submodule)
+            .flat_map(|f| f.hunks.iter())
+            .map(|h| u64::from(h.a1 - h.a0))
+            .sum();
+        if added == 0 || added > u64::from(self.opts.blame_max_lines) {
+            return;
+        }
+        let git_dir = self.repo.path();
+        for f in files.iter_mut() {
+            if f.binary || f.submodule || f.approx || !f.hunks.iter().any(|h| h.a1 > h.a0) {
+                continue;
+            }
+            match crate::blame::blame_added(
+                git_dir,
+                commit.id,
+                commit.parents[0],
+                &f.path,
+                &f.hunks,
+            ) {
+                Ok(runs) => f.blame = Some(runs),
+                Err(e) => tracing::debug!("merge blame fell back to the merger: {e:#}"),
+            }
+        }
     }
 
     fn file_diff(&self, change: Change) -> anyhow::Result<Option<FileDiff>> {

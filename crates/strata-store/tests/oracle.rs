@@ -182,7 +182,46 @@ fn check_repo(name: &str) {
     );
     assert_eq!(size, total, "{name}: line_delta doesn't sum to repo size");
 
-    // 4. The query endpoints run.
+    // 4. Survival attribution: per file, lines per author email equal `git blame -w HEAD`
+    //    (merged lines credited to their side-branch authors, not the merger).
+    let ours: HashMap<(String, String), i64> = db
+        .with(&id, |c, s| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT p.path, lower(a.email), sum(o.delta)::BIGINT FROM {s}.origin_deltas o
+                 JOIN {s}.paths p USING (path_id) JOIN {s}.authors a ON a.author_id = o.author_id
+                 GROUP BY ALL HAVING sum(o.delta) <> 0"
+            ))?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
+        })
+        .unwrap();
+    let mut theirs: HashMap<(String, String), i64> = HashMap::new();
+    for path in head_lines.iter().filter(|(_, n)| **n > 0).map(|(p, _)| p) {
+        let out = git(
+            &repo,
+            &["blame", "-w", "--line-porcelain", "HEAD", "--", path],
+        );
+        for line in out.lines() {
+            if let Some(mail) = line.strip_prefix("author-mail ") {
+                let mail = mail
+                    .trim_start_matches('<')
+                    .trim_end_matches('>')
+                    .to_lowercase();
+                *theirs.entry((path.clone(), mail)).or_insert(0) += 1;
+            }
+        }
+    }
+    assert_eq!(
+        ours, theirs,
+        "{name}: surviving lines per author differ from git blame"
+    );
+
+    // 5. The query endpoints run.
     let f = Filters {
         exclude: vec![4, 5, 6, 7],
         ..Default::default()

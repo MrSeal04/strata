@@ -73,6 +73,14 @@ enum ProgressMode {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum Attribution {
+    /// Credit lines a merge brings in to the side-branch commits that wrote them (git blame)
+    Blame,
+    /// Credit them to the merge commit's author (faster on huge merge-heavy histories)
+    Merger,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum Ws {
     /// A whitespace-only change doesn't make lines new (default)
     Ignore,
@@ -93,6 +101,9 @@ struct ExtractArgs {
     /// How survival treats whitespace-only edits
     #[arg(long, value_enum, default_value = "ignore")]
     survival_ws: Ws,
+    /// Who gets credit for lines that arrive through a merge
+    #[arg(long, value_enum, default_value = "blame")]
+    merge_attribution: Attribution,
     /// Files larger than this (MB) get approximate counts instead of a line diff
     #[arg(long, default_value_t = 16)]
     max_diff_mb: u64,
@@ -123,6 +134,7 @@ impl ExtractArgs {
             diff: DiffOptions {
                 max_diff_bytes: self.max_diff_mb << 20,
                 survival_ws_ignore: matches!(self.survival_ws, Ws::Ignore),
+                merge_blame: matches!(self.merge_attribution, Attribution::Blame),
                 ..Default::default()
             },
             ..Default::default()

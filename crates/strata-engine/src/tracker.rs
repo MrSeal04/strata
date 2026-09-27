@@ -174,6 +174,13 @@ impl Tracker {
         self.files.remove(&path)
     }
 
+    /// Add `sign` × the file's line composition to `acc` (moving lines between paths on rename).
+    pub fn account_all(&self, st: &FileState, sign: i32, acc: &mut DeltaAcc) {
+        for r in &st.runs {
+            acc.add(&self.origins[r.origin as usize], sign * r.len as i32);
+        }
+    }
+
     pub fn put(&mut self, path: PathId, state: FileState) {
         self.files.insert(path, state);
     }

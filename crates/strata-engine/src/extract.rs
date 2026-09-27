@@ -19,7 +19,7 @@ use crate::config::RepoConfig;
 use crate::diff::{DiffOptions, DiffWorker, StepDiff};
 use crate::identity::{Identities, RawIdentity};
 use crate::model::*;
-use crate::tracker::{DeltaAcc, Tracker};
+use crate::tracker::{DeltaAcc, OriginId, Tracker};
 use crate::walk::{self, Landing};
 
 const CHECKPOINT_FORMAT: u32 = 1;
@@ -52,8 +52,12 @@ impl ExtractOptions {
     /// Everything that changes extracted data; a mismatch forces a full re-extract.
     fn fingerprint(&self) -> String {
         format!(
-            "engine={ENGINE_VERSION};ws={};maxdiff={};renames={}",
-            self.diff.survival_ws_ignore, self.diff.max_diff_bytes, self.diff.rename_limit
+            "engine={ENGINE_VERSION};ws={};maxdiff={};renames={};blame={}/{}",
+            self.diff.survival_ws_ignore,
+            self.diff.max_diff_bytes,
+            self.diff.rename_limit,
+            self.diff.merge_blame,
+            self.diff.blame_max_lines
         )
     }
 }
@@ -202,8 +206,9 @@ fn process_step(
         })
         .collect();
 
-    // Merge steps are attributed to the merger here; exact attribution needs ranged blame.
+    // Default origin for new lines: this step's commit (for merges, lines blame couldn't place).
     let origin = st.tracker.new_origin(c.author.time, author_id);
+    let mut blame_origins: FxHashMap<ObjectId, OriginId> = FxHashMap::default();
     let mut acc = DeltaAcc::default();
     let mut changes = Vec::with_capacity(d.files.len() + 4);
     let mut deltas = Vec::new();
@@ -235,6 +240,9 @@ fn process_step(
         if let (kind::RENAME, Some(old)) = (f.kind, &f.old_path) {
             let old_id = st.intern(old, step);
             let state = st.tracker.take(old_id).unwrap_or_default();
+            // The lines leave the old path (and arrive at the new one below).
+            st.tracker.account_all(&state, -1, &mut acc);
+            acc.drain_into(step, old_id, &mut deltas);
             changes.push(ChangeRow {
                 step,
                 path_id: old_id,
@@ -272,6 +280,7 @@ fn process_step(
         let mut old_path_id = NO_PATH;
         if let Some((old_id, state)) = moved.remove(&i) {
             old_path_id = old_id;
+            st.tracker.account_all(&state, 1, &mut acc);
             st.tracker.put(path_id, state);
         }
 
@@ -283,15 +292,46 @@ fn process_step(
                 if f.submodule { 0 } else { f.bytes_after },
                 &mut acc,
             );
-        } else if !st.tracker.apply(
-            path_id,
-            &f.hunks,
-            f.new_lines,
-            f.bytes_after,
-            &|_| origin,
-            &mut acc,
-        ) {
-            st.inconsistent += 1;
+        } else {
+            // Merge steps with blame: each added line gets the side commit that wrote it.
+            let runs: Vec<(u32, u32, OriginId)> = match &f.blame {
+                Some(b) => b
+                    .iter()
+                    .map(|r| {
+                        let o = match &r.origin {
+                            Some(bo) => *blame_origins.entry(bo.sha).or_insert_with(|| {
+                                let sig = gix::actor::SignatureRef {
+                                    name: bo.name.as_bstr(),
+                                    email: bo.email.as_bstr(),
+                                    time: "",
+                                };
+                                let aid = st.ids.resolve(sig, false);
+                                st.tracker.new_origin(bo.time, aid)
+                            }),
+                            None => origin,
+                        };
+                        (r.start, r.len, o)
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            let origin_of = |line: u32| -> OriginId {
+                let i = runs.partition_point(|&(s, _, _)| s <= line);
+                match i.checked_sub(1).map(|i| runs[i]) {
+                    Some((s, n, o)) if line < s + n => o,
+                    _ => origin,
+                }
+            };
+            if !st.tracker.apply(
+                path_id,
+                &f.hunks,
+                f.new_lines,
+                f.bytes_after,
+                &origin_of,
+                &mut acc,
+            ) {
+                st.inconsistent += 1;
+            }
         }
 
         let (lines_after, mean, (top_author, top_share)) = match st.tracker.get(path_id) {
