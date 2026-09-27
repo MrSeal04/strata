@@ -90,10 +90,16 @@ export class TimeStrip {
     const s = this.app.store.get();
     const [a, b] = s.brush ?? [0, s.steps - 1];
     let lastLabelEnd = -Infinity;
-    for (const t of this.app.summary.tags) {
-      if (t.step < a || t.step > b) continue;
+    let lastTick = -Infinity;
+    let tags = this.app.summary.tags.filter((t) => t.step >= a && t.step <= b);
+    // Many tags: show final releases only (no -rc / alpha / beta / pre / dev).
+    if (tags.length > this.plotW / 12) tags = tags.filter((t) => !/(rc|alpha|beta|pre|dev|test)[-.\d]*$/i.test(t.name));
+    for (const t of tags) {
       const x = this.stepPx(t.step);
-      p.line(x, top, x, top + 5, pal.inkMuted, 1);
+      if (x - lastTick >= 3) {
+        p.line(x, top, x, top + 5, pal.inkMuted, 1);
+        lastTick = x;
+      }
       const w = p.measure(t.name, 9);
       if (x - w / 2 > lastLabelEnd + 6 && x + w / 2 < this.m.left + this.plotW) {
         p.text(t.name, x, top - 1, { color: pal.inkMuted, size: 9, align: "center", baseline: "bottom" });

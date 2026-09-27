@@ -1,7 +1,7 @@
 import { type HierarchyNode, type HierarchyRectangularNode, hierarchy, partition, tree as d3tree } from "d3";
 import type { App } from "../app";
 import { colorMaps } from "../model/colors";
-import { type TNode, stableChildren } from "../model/filetree";
+import { TNode, stableChildren } from "../model/filetree";
 import { CanvasPainter } from "../paint/canvas";
 import type { Painter } from "../paint/painter";
 import type { TreeLayout } from "../state/store";
@@ -23,6 +23,8 @@ interface VNode {
   rep: TNode | null;
   leaves: number;
   parent: VNode | null;
+  /** A grouping of a folder's loose files (not a real directory). */
+  synthetic?: boolean;
 }
 
 interface Geo {
@@ -51,6 +53,28 @@ interface Beam {
   node: string;
   born: number;
   del: boolean;
+}
+
+/** The largest file below a visible node (the color of a collapsed folder). */
+function largestFile(v: VNode): TNode | null {
+  let rep: TNode | null = null;
+  const stack = [...v.children];
+  while (stack.length) {
+    const c = stack.pop()!;
+    if (c.t.file && (!rep || c.t.file.lines > rep.file!.lines)) rep = c.t;
+    if (c.rep?.file && (!rep || c.rep.file.lines > rep.file!.lines)) rep = c.rep;
+    stack.push(...c.children);
+  }
+  if (!rep) {
+    // collapsed without visible children: search the real subtree
+    const walk = [v.t];
+    while (walk.length) {
+      const t = walk.pop()!;
+      if (t.file && (!rep || t.file.lines > rep.file!.lines)) rep = t;
+      if (t.children) walk.push(...t.children.values());
+    }
+  }
+  return rep;
 }
 
 const LAYOUT_LABEL: Record<TreeLayout, string> = {
@@ -120,7 +144,25 @@ export class TreeView extends View {
    * folder stands in for its subtree (sized by lines, colored like its largest file).
    */
   private buildVisible(display: TNode): VNode {
-    const mk = (t: TNode): VNode => ({ id: t.id, t, children: t.children ? stableChildren(t).map(mk) : [], collapsed: false, rep: null, leaves: 0, parent: null });
+    // Folders with many loose files get them grouped under a synthetic "N files" node, so the
+    // collapse below can fold them like a folder (a root with 400 files would otherwise be a ring).
+    const LOOSE = 40;
+    const mk = (t: TNode): VNode => {
+      const kids = t.children ? stableChildren(t) : [];
+      const files = kids.filter((c) => !c.isDir);
+      const dirs = kids.filter((c) => c.isDir);
+      let children: VNode[];
+      if (files.length > LOOSE && dirs.length > 0) {
+        const g = new TNode(`${t.id}\u0000files`, `${files.length} files`, t, true, files[0].order);
+        g.value = files.reduce((a, f) => a + (f.file?.lines ?? 0), 0);
+        g.files = files.length;
+        const group: VNode = { id: g.id, t: g, children: files.map(mk), collapsed: false, rep: null, leaves: 0, parent: null, synthetic: true };
+        children = [...dirs.map(mk), group];
+      } else {
+        children = kids.map(mk);
+      }
+      return { id: t.id, t, children, collapsed: false, rep: null, leaves: 0, parent: null };
+    };
     const root = mk(display);
     // parent links + leaf counts
     const leafParents: VNode[] = [];
@@ -136,6 +178,21 @@ export class TreeView extends View {
       if (allLeaves && v !== root) leafParents.push(v);
       return (v.leaves = n);
     };
+    // Deep chains squeeze every shallow ring toward the center; fold folders below a depth cap
+    // (drill in to see deeper).
+    const maxDepth = { radial: 4, force: 6, sunburst: 6, icicle: 6 }[this.app.store.get().settings.treeLayout];
+    const fold = (v: VNode, depth: number) => {
+      if (!v.children.length) return;
+      if (depth >= maxDepth && v !== root) {
+        v.rep = largestFile(v);
+        v.children = [];
+        v.collapsed = true;
+        return;
+      }
+      for (const c of v.children) fold(c, depth + 1);
+    };
+    fold(root, 0);
+    leafParents.length = 0;
     let total = count(root, null);
     const cap = this.leafCapacity();
     if (total <= cap) return root;
@@ -147,19 +204,10 @@ export class TreeView extends View {
     while (total > cap && heap.length) {
       const { v } = heap.pop()!;
       if (v.collapsed || !v.children.length) continue;
-      // representative = largest file below
-      let rep: TNode | null = null;
-      const stack = [...v.children];
-      while (stack.length) {
-        const c = stack.pop()!;
-        if (c.t.file && (!rep || c.t.file.lines > rep.file!.lines)) rep = c.t;
-        if (c.rep?.file && (!rep || c.rep.file.lines > rep.file!.lines)) rep = c.rep;
-        stack.push(...c.children);
-      }
       total -= v.children.length - 1;
+      v.rep = largestFile(v);
       v.children = [];
       v.collapsed = true;
-      v.rep = rep;
       const par = v.parent;
       if (par && par !== root && par.children.every((c) => !c.children.length)) {
         const k = key(par);
@@ -601,7 +649,8 @@ export class TreeView extends View {
       tooltip.hide();
       return;
     }
-    const box = h("div", {}, h("div", { class: "h", text: v.id || "/" }));
+    const title = v.synthetic ? `${v.t.name} in ${v.t.parent?.id || "/"}` : v.id || "/";
+    const box = h("div", {}, h("div", { class: "h", text: title }));
     if (v.t.isDir) {
       box.append(tipRow(null, fmt.int(v.t.value), "lines"), tipRow(null, fmt.int(v.t.files), "files"));
       box.append(h("div", { class: "sub", text: v.collapsed ? "Collapsed (node budget) · click to open" : "Click to zoom in" }));
@@ -623,7 +672,7 @@ export class TreeView extends View {
   protected onPointerDown(x: number, y: number) {
     const v = this.hit(x, y);
     if (!v) return;
-    const dir = v.t.isDir ? v.t : v.t.parent;
+    const dir = v.synthetic ? v.t.parent : v.t.isDir ? v.t : v.t.parent;
     if (dir && dir.id !== this.app.store.get().root && (v.t.isDir || v.collapsed)) {
       tooltip.hide();
       this.app.store.set({ root: dir.id });

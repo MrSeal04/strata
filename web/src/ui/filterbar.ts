@@ -91,22 +91,11 @@ export class FilterBar {
       items.push(h("span", { class: "sl", text: "/" }), b);
     });
     this.crumbs.replaceChildren(...items);
-    // category chips
-    const counts = new Map(this.app.summary.categories.map((c) => [c.category, c.paths]));
-    this.chips.replaceChildren(
-      ...CATEGORY_NAMES.map((name, code) => {
-        if (!counts.get(code)) return null;
-        const off = s.settings.exclude.includes(code);
-        const chip = h("button", { class: `chip${off ? " off" : ""}`, title: `${off ? "Show" : "Hide"} ${name} files (${fmt.int(counts.get(code)!)} paths)`, "aria-pressed": String(!off) }, name);
-        chip.addEventListener("click", () => {
-          const ex = new Set(this.app.store.get().settings.exclude);
-          if (ex.has(code)) ex.delete(code);
-          else ex.add(code);
-          this.app.store.setSettings({ exclude: [...ex].sort() });
-        });
-        return chip;
-      }).filter((c): c is HTMLButtonElement => c !== null),
-    );
+    // categories: one button; the popover lists every category with its path count
+    const hidden = CATEGORY_NAMES.filter((_, code) => s.settings.exclude.includes(code) && this.catCounts().get(code));
+    const catBtn = h("button", { class: "btn", title: "Which kinds of files count" }, hidden.length ? `Files: ${hidden.length} kinds hidden` : "Files: all kinds");
+    catBtn.addEventListener("click", () => this.pickCategories(catBtn));
+    this.chips.replaceChildren(catBtn);
     this.langBtn.textContent = s.langs.length ? `Languages: ${s.langs.length === 1 ? s.langs[0] : s.langs.length}` : "Languages";
     this.langBtn.classList.toggle("on", s.langs.length > 0);
     this.authorBtn.textContent = s.authors.length ? `Authors: ${s.authors.length === 1 ? this.app.authorName(s.authors[0]) : s.authors.length}` : "Authors";
@@ -118,6 +107,22 @@ export class FilterBar {
     this.compareBtn.classList.toggle("on", !!s.compare);
     this.summaryBtn.style.display = s.compare && this.app.compare.data ? "" : "none";
     this.searchInfo.textContent = s.search ? `${fmt.int(s.search.steps.length)} commits${s.search.paths.size ? ` · ${fmt.int(s.search.paths.size)} files` : ""}` : "";
+  }
+
+  private catCounts(): Map<number, number> {
+    return new Map(this.app.summary.categories.map((c) => [c.category, c.paths]));
+  }
+
+  private pickCategories(anchor: HTMLElement) {
+    const counts = this.catCounts();
+    const opts = CATEGORY_NAMES.map((name, code) => ({ value: String(code), label: name, hint: `${fmt.compact(counts.get(code) ?? 0)} paths` })).filter((o) => counts.get(Number(o.value)));
+    const shown = opts.filter((o) => !this.app.store.get().settings.exclude.includes(Number(o.value))).map((o) => o.value);
+    multiSelect(anchor, "Kinds of files to count", opts, shown, (v) => {
+      const keep = new Set(v.map(Number));
+      // "Show all" clears the selection: treat empty as everything shown.
+      const exclude = v.length ? CATEGORY_NAMES.map((_, i) => i).filter((i) => !keep.has(i)) : [];
+      this.app.store.setSettings({ exclude });
+    });
   }
 
   private pickLangs() {
