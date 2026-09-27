@@ -1,0 +1,142 @@
+import { type Author, api, boolCol, col } from "../api/client";
+import type { App } from "../app";
+import { openExportMenu } from "../export/menu";
+import { colorMaps } from "../model/colors";
+import { FileTree, Paths } from "../model/filetree";
+import { StateSync } from "../model/sync";
+import { DEFAULT_SETTINGS, Store, initialState, loadSettings, saveSettings } from "../state/store";
+import { applyTheme, onPaletteChange } from "../theme";
+import { Timeline } from "../timeline/axis";
+import { Player, runDuration } from "../timeline/playback";
+import { AreaView } from "../views/area";
+import { BarsView } from "../views/bars";
+import { TreeView } from "../views/tree";
+import { TreemapView } from "../views/treemap";
+import type { View } from "../views/view";
+import { h } from "./dom";
+import { FilterBar } from "./filterbar";
+import { openCommit, openSettings } from "./panels";
+import { Transport } from "./transport";
+
+export interface Dashboard {
+  app: App;
+  views: { treemap: TreemapView; tree: TreeView; area: AreaView; bars: BarsView };
+  grid: HTMLElement;
+  frame: HTMLElement;
+  destroy(): void;
+}
+
+export async function openDashboard(root: HTMLElement, repo: string): Promise<Dashboard> {
+  const [metaRes, axisT, pathsT, authors] = await Promise.all([api.meta(repo), api.axis(repo), api.paths(repo), api.authors(repo)]);
+  const tl = new Timeline(col(axisT, "t"), Uint8Array.from(col(axisT, "flags")), boolCol(axisT, "is_merge"), col(axisT, "author", -1));
+  const paths = new Paths(pathsT);
+  const tree = new FileTree(paths);
+  const steps = tl.n;
+  const settings = { ...DEFAULT_SETTINGS, ...loadSettings(repo) };
+  const store = new Store({ ...initialState(), repo, steps, cursor: steps - 1, pos: steps - 1, settings });
+  applyTheme(settings.theme, settings.diffColors);
+  const player = new Player(store, () => tl);
+  const sync = new StateSync(store, tree);
+  const byId = new Map<number, Author>(authors.map((a) => [a.id, a]));
+
+  // Stable colors for this repo: languages ranked by current size.
+  colorMaps.lang.reset();
+  colorMaps.author.reset();
+  colorMaps.dir.reset();
+  colorMaps.lang.assign(metaRes.summary.langs.map((l) => l.lang));
+
+  const app: App = {
+    repo,
+    meta: metaRes.meta,
+    store,
+    tl,
+    paths,
+    tree,
+    sync,
+    player,
+    summary: metaRes.summary,
+    authors,
+    authorName: (id) => byId.get(id)?.name ?? (id >= 0 ? `author ${id}` : "unknown"),
+    openCommit: (step) => void openCommit(app, step),
+    stepsPerSecond: () => {
+      const s = store.get();
+      const [a, b] = s.brush ?? [0, Math.max(0, s.steps - 1)];
+      return (b - a + 1) / Math.max(0.1, runDuration(s.settings, tl, a, b));
+    },
+  };
+  // Authors ranked by commits get the categorical slots (area/treemap/tree share them).
+  colorMaps.author.assign(authors.filter((a) => !a.is_bot).map((a) => a.name));
+
+  const views = { treemap: new TreemapView(app), tree: new TreeView(app), area: new AreaView(app), bars: new BarsView(app) };
+  const grid = h("main", { class: "dash" }, views.treemap.el, views.tree.el, views.area.el, views.bars.el);
+  const transport = new Transport(app);
+  const bar = new FilterBar(app, {
+    settings: (a) => openSettings(app, a),
+    export: (a) => openExportMenu(dash, a),
+    theme: () => {
+      const cur = store.get().settings.theme;
+      const dark = cur === "dark" || (cur === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
+      store.setSettings({ theme: dark ? "light" : "dark" });
+    },
+  });
+  const frame = h("div", { class: "frame" }, bar.el, grid, transport.el);
+  root.replaceChildren(frame);
+
+  const all: View[] = Object.values(views);
+  sync.onChange = () => {
+    views.treemap.invalidate();
+    views.tree.invalidate();
+  };
+  sync.onLoading = (on) => {
+    views.treemap.setLoading(on);
+    views.tree.setLoading(on);
+  };
+  const unsubs = [
+    store.watch((s) => s.filterRev, () => sync.reset()),
+    store.watch((s) => s.cursor, (c) => void sync.goto(c)),
+    store.watch((s) => s.settings, (s) => saveSettings(repo, s)),
+    store.watch((s) => [s.settings.theme, s.settings.diffColors], () => applyTheme(store.get().settings.theme, store.get().settings.diffColors)),
+    onPaletteChange(() => all.forEach((v) => v.invalidate())),
+  ];
+  void sync.goto(store.get().cursor);
+
+  const onKey = (e: KeyboardEvent) => {
+    const t = e.target as HTMLElement;
+    if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA")) return;
+    const s = store.get();
+    if (e.key === " ") {
+      e.preventDefault();
+      player.toggle();
+    } else if (e.key === "ArrowRight") {
+      player.seek(s.cursor + (e.shiftKey ? 10 : 1));
+    } else if (e.key === "ArrowLeft") {
+      player.seek(s.cursor - (e.shiftKey ? 10 : 1));
+    } else if (e.key === "Home") {
+      player.seek(s.brush?.[0] ?? 0);
+    } else if (e.key === "End") {
+      player.seek(s.brush?.[1] ?? s.steps - 1);
+    } else if (e.key === "/") {
+      e.preventDefault();
+      bar.focusSearch();
+    } else if (e.key === "Escape") {
+      if (s.compare) store.set({ compare: null });
+      else if (s.brush) store.set({ brush: null });
+      document.querySelectorAll(".commit-panel").forEach((el) => el.remove());
+    }
+  };
+  document.addEventListener("keydown", onKey);
+
+  const dash: Dashboard = {
+    app,
+    views,
+    grid,
+    frame,
+    destroy() {
+      player.pause();
+      unsubs.forEach((u) => u());
+      document.removeEventListener("keydown", onKey);
+      all.forEach((v) => v.destroy());
+    },
+  };
+  return dash;
+}

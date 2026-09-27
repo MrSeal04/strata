@@ -418,7 +418,7 @@ impl Db {
             ipc(
                 c,
                 &format!(
-                    "SELECT axis_time::DOUBLE AS t, flags, is_merge FROM {s}.steps ORDER BY step"
+                    "SELECT st.axis_time::DOUBLE AS t, st.flags, st.is_merge, k.canonical_id AS author FROM {s}.steps st LEFT JOIN {s}.canon k ON k.author_id = st.author_id ORDER BY st.step"
                 ),
             )
         })
