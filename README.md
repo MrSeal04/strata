@@ -100,6 +100,14 @@ and each one is a toggle in the filter row.
 |---|---|---|---|---|---|
 | myrepo | 422 | 2.1 s (debug build) | n/a | small | n/a |
 | git/git | 24,344 | 25.6 s | ~770 MB | 10.8 MB | 47 ms (message search) |
+| torvalds/linux | 77,194 | ~36 min (+ ~30 min clone) | 1.0–1.6 GB | 227 MB | see below |
+
+Linux notes:
+- The extraction was interrupted at step 60,771 and resumed on a newer engine. The first 60,771
+  steps took ~25 minutes; the last 16,423 took 10.6 minutes with parallel blame fallbacks.
+- Merge attribution agreed with `git blame -w HEAD` for 90.1% of lines on 20 sampled files.
+- Dashboard playback runs at ~17 fps in Chrome on the desktop GPU (WebGL treemap layer, ~60k
+  cells), measured while other jobs held the machine at load average 15.
 
 ## Development
 

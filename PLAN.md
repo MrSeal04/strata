@@ -544,4 +544,16 @@ places while building:
 
 Measured (desktop, 12 threads): git/git, 24,344 first-parent steps, extracts in 25.6 s with
 ~770 MB peak anonymous memory and a 10.8 MB cache. Every query stays under 50 ms at p95.
-Linux results are in the README.
+
+Linux (77,194 first-parent steps; the scale target):
+
+| Target (§8) | Result |
+|---|---|
+| Extraction ≤ 60 min | Met: ~36 min, plus ~30 min to clone. The run was interrupted once and resumed on a newer engine. |
+| Peak RSS ≤ 4 GB | Met: 1.0–1.6 GB anonymous memory, plus the memory-mapped pack, which is reclaimable. |
+| UI queries ≤ 300 ms p95 | Mostly met: area and bar queries use lazy aggregates and a result cache, and cached calls take < 10 ms. Cold message and path search can exceed it (0.3–1 s), and runs under heavy memory pressure spiked higher. |
+| Playback ≥ 30 fps with LOD | Not met: ~17 fps in Chrome on the desktop GPU with ~60k cells, measured at load average 15. A WebGL treemap layer and LOD got it there from 3.4 fps. |
+| Survival within tolerance of blame | git/git 99.1% of lines. Linux 90.1% on 20 files: the most recent 16k steps were extracted before merge-aware replay existed. Re-extract with `--full` to re-check. |
+
+Additions not in the original plan: the WebGL2 treemap layer (§10's escape hatch), per-repo
+lazy aggregates, the query cache, `strata bench --verify` and `tools/smoke.mjs` (make smoke).
