@@ -2,6 +2,7 @@ import { CATEGORY_NAMES, api } from "../api/client";
 import type { App } from "../app";
 import { colorMaps } from "../model/colors";
 import { fmt, h, icon } from "./dom";
+import { openCompareSummary } from "./panels";
 import { multiSelect } from "./popover";
 
 /** The one filter row above everything it scopes. */
@@ -17,6 +18,7 @@ export class FilterBar {
   private searchKind: HTMLSelectElement;
   private searchInfo: HTMLElement;
   private compareBtn: HTMLButtonElement;
+  private summaryBtn: HTMLButtonElement;
   private brushBtn: HTMLButtonElement;
 
   constructor(
@@ -57,6 +59,9 @@ export class FilterBar {
     this.brushBtn.addEventListener("click", () => store.set({ brush: null }));
     this.compareBtn = h("button", { class: "btn", title: "Compare two points: the selected range's ends, or start vs. now" }, icon("compare"), "Compare");
     this.compareBtn.addEventListener("click", () => this.toggleCompare());
+    this.summaryBtn = h("button", { class: "btn", title: "What changed between A and B", text: "Summary" });
+    this.summaryBtn.addEventListener("click", () => openCompareSummary(app, this.summaryBtn));
+    app.compare.onChange(() => this.render());
     const exportBtn = h("button", { class: "btn icon", title: "Export PNG / SVG / video", "aria-label": "Export" }, icon("download"));
     exportBtn.addEventListener("click", () => actions.export(exportBtn));
     const settingsBtn = h("button", { class: "btn icon", title: "Settings", "aria-label": "Settings" }, icon("gear"));
@@ -66,7 +71,7 @@ export class FilterBar {
     this.el = h("header", { class: "filterbar" },
       home, name, this.crumbs, h("span", { class: "sep" }), this.chips, this.langBtn, this.authorBtn, this.botsBtn, this.wsBtn,
       h("span", { class: "sep" }), this.searchKind, this.searchInput, this.searchInfo,
-      h("span", { class: "grow" }), this.brushBtn, this.compareBtn, exportBtn, settingsBtn, themeBtn,
+      h("span", { class: "grow" }), this.brushBtn, this.compareBtn, this.summaryBtn, exportBtn, settingsBtn, themeBtn,
     );
     store.watch((s) => [s.root, s.langs, s.authors, s.settings.exclude, s.settings.hideBots, s.settings.ws, s.brush, s.compare, s.search?.steps.length], () => this.render(), true);
   }
@@ -102,15 +107,16 @@ export class FilterBar {
         return chip;
       }).filter((c): c is HTMLButtonElement => c !== null),
     );
-    this.langBtn.textContent = s.langs.length ? `Languages: ${s.langs.length === 1 ? s.langs[0] : s.langs.length}` : "All languages";
+    this.langBtn.textContent = s.langs.length ? `Languages: ${s.langs.length === 1 ? s.langs[0] : s.langs.length}` : "Languages";
     this.langBtn.classList.toggle("on", s.langs.length > 0);
-    this.authorBtn.textContent = s.authors.length ? `Authors: ${s.authors.length === 1 ? this.app.authorName(s.authors[0]) : s.authors.length}` : "All authors";
+    this.authorBtn.textContent = s.authors.length ? `Authors: ${s.authors.length === 1 ? this.app.authorName(s.authors[0]) : s.authors.length}` : "Authors";
     this.authorBtn.classList.toggle("on", s.authors.length > 0);
     this.botsBtn.classList.toggle("on", s.settings.hideBots);
     this.wsBtn.classList.toggle("on", s.settings.ws);
     this.brushBtn.style.display = s.brush ? "" : "none";
     if (s.brush) this.brushBtn.textContent = `Range #${fmt.int(s.brush[0] + 1)}–#${fmt.int(s.brush[1] + 1)} ✕`;
     this.compareBtn.classList.toggle("on", !!s.compare);
+    this.summaryBtn.style.display = s.compare && this.app.compare.data ? "" : "none";
     this.searchInfo.textContent = s.search ? `${fmt.int(s.search.steps.length)} commits${s.search.paths.size ? ` · ${fmt.int(s.search.paths.size)} files` : ""}` : "";
   }
 

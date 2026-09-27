@@ -245,3 +245,4 @@ input[type="range"] { accent-color: var(--accent); }
   .transport .now { max-width: none; }
   .panel { top: 8px; right: 8px; left: 8px; width: auto; }
 }
+.commit-panel td.num { white-space: nowrap; }

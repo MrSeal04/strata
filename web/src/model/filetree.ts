@@ -79,6 +79,8 @@ export class FileTree {
   lastTouched: number[] = [];
   /** Step of the most recent applied event. */
   lastTouchedStep = -1;
+  /** Recent renames, new path -> old path (so layouts can move a node instead of re-creating it). */
+  readonly renames = new Map<string, string>();
 
   constructor(readonly paths: Paths) {}
 
@@ -180,6 +182,10 @@ export class FileTree {
         this.lastTouchedStep = ev.step[i];
       }
       if (k !== 4) this.lastTouched.push(pid);
+      if (k === 3 && ev.oldPath[i] >= 0) {
+        if (this.renames.size > 2000) this.renames.clear();
+        this.renames.set(this.paths.path[pid], this.paths.path[ev.oldPath[i]]);
+      }
       if (k === 2 || k === 4) {
         this.remove(pid);
       } else {

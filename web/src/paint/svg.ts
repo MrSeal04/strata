@@ -82,7 +82,12 @@ export class SvgPainter implements Painter {
   }
   measure(s: string, size: number, weight: number | string = 400) {
     if (!this.measureCtx) {
-      this.measureCtx = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(1, 1).getContext("2d") : document.createElement("canvas").getContext("2d");
+      this.measureCtx =
+        typeof OffscreenCanvas !== "undefined"
+          ? new OffscreenCanvas(1, 1).getContext("2d")
+          : typeof document !== "undefined"
+            ? document.createElement("canvas").getContext("2d")
+            : null;
     }
     if (!this.measureCtx) return s.length * size * 0.55;
     this.measureCtx.font = `${weight} ${size}px ${FONT}`;

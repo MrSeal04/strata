@@ -1,14 +1,13 @@
 import { type HierarchyRectangularNode, hierarchy, treemap, treemapBinary } from "d3";
-import { api, col, filterParams } from "../api/client";
 import type { App } from "../app";
+import { clock } from "../clock";
 import { colorMaps, diverging, inkOn, mix, sequential } from "../model/colors";
-import { type TNode, stableChildren } from "../model/filetree";
+import { type FileTree, type TNode, stableChildren } from "../model/filetree";
 import type { Painter } from "../paint/painter";
 import type { ColorBy } from "../state/store";
 import { palette } from "../theme";
 import { fmt, h } from "../ui/dom";
 import { tipRow, tooltip } from "../ui/tooltip";
-import { clock } from "../clock";
 import { renderColorLegend } from "./colorlegend";
 import { View } from "./view";
 
@@ -26,6 +25,7 @@ export function fileColor(app: App, node: TNode, mode: ColorBy, now: number): st
   const pal = palette();
   const f = node.file;
   if (!f) return pal.dir;
+  if (app.store.get().compare && app.compare.data) return growthColor(app, f.pathId);
   switch (mode) {
     case "lang":
       return colorMaps.lang.color(app.paths.lang[f.pathId] || "Other");
@@ -45,6 +45,17 @@ export function fileColor(app: App, node: TNode, mode: ColorBy, now: number): st
   }
 }
 
+/** Compare mode: born = additions color, died = deletions color, otherwise diverging on log2(B/A). */
+export function growthColor(app: App, pathId: number): string {
+  const pal = palette();
+  const d = app.compare.data!;
+  const a = d.linesA.get(pathId) ?? 0;
+  const b = d.linesB.get(pathId) ?? 0;
+  if (a === 0 && b > 0) return pal.add;
+  if (b === 0 && a > 0) return pal.del;
+  return diverging(Math.log2((b + 1) / (a + 1)) / 3);
+}
+
 /** 1 when a file was just touched, decaying to 0 over `heatSeconds` of playback. */
 export function heat(app: App, touched: number, pos: number): number {
   if (touched < 0) return 0;
@@ -54,91 +65,105 @@ export function heat(app: App, touched: number, pos: number): number {
   return Math.exp(-Math.max(0, age) / steps);
 }
 
+interface Pane {
+  key: string;
+  label: string | null;
+  tree: FileTree;
+  x: number;
+  w: number;
+  root: LNode | null;
+  nodes: LNode[];
+}
+
 export class TreemapView extends View {
-  private root: LNode | null = null;
-  private nodes: LNode[] = [];
+  private panes: Pane[] = [];
   private shown = new Map<string, Rect>();
-  private layoutRev = -1;
+  private layoutKey = "";
   private layoutAt = 0;
-  private layoutW = 0;
-  private layoutH = 0;
-  private hover: LNode | null = null;
+  private hover: { pane: Pane; node: LNode } | null = null;
   private moving = false;
   private lastFrame = 0;
-  private compareData: { key: string; a: Map<number, number>; b: Map<number, number> } | null = null;
+  private modeSel: HTMLSelectElement;
 
   constructor(private app: App) {
     super("treemap", "Files by size");
+    this.modeSel = h("select", { "aria-label": "Compare layout" }, h("option", { value: "overlay", text: "B, colored by change" }), h("option", { value: "side", text: "A and B side by side" }));
+    this.modeSel.addEventListener("change", () => {
+      const c = app.store.get().compare;
+      if (c) app.store.set({ compare: { ...c, mode: this.modeSel.value as "overlay" | "side" } });
+    });
+    this.addControl(this.modeSel);
     app.store.watch((s) => [s.cursor, s.settings.colorBy, s.search?.paths.size, s.settings.theme, s.settings.diffColors], () => this.invalidate());
     app.store.watch((s) => [s.settings.colorBy, s.compare, s.langs, s.settings.theme, s.settings.diffColors, s.settings.colorBy === "age" ? s.cursor : 0], () => renderColorLegend(app, this.legend), true);
     app.store.watch((s) => [s.root, s.compare, s.filterRev], () => {
-      this.layoutRev = -1;
-      this.loadCompare();
+      this.layoutKey = "";
       this.updateTitle();
       this.invalidate();
+    }, true);
+    app.compare.onChange(() => {
+      this.layoutKey = "";
+      this.invalidate();
     });
-    this.updateTitle();
   }
 
   private updateTitle() {
     const s = this.app.store.get();
     const t = this.head.querySelector("h2")!;
     t.textContent = s.compare
-      ? `Files: #${fmt.int(s.compare.a + 1)} → #${fmt.int(s.compare.b + 1)} (size = B, color = growth)`
+      ? `Files: #${fmt.int(s.compare.a + 1)} → #${fmt.int(s.compare.b + 1)}`
       : `Files by size${s.root ? ` · ${s.root}/` : ""}`;
+    this.modeSel.style.display = s.compare ? "" : "none";
+    if (s.compare) this.modeSel.value = s.compare.mode;
   }
 
-  private loadCompare() {
+  /** Which trees to lay out, and where. */
+  private paneSpecs(): Omit<Pane, "root" | "nodes">[] {
     const s = this.app.store.get();
-    if (!s.compare) {
-      this.compareData = null;
-      return;
-    }
-    const p = filterParams(s);
-    p.set("a", String(s.compare.a));
-    p.set("b", String(s.compare.b));
-    const key = p.toString();
-    if (this.compareData?.key === key) return;
-    api.compare(this.app.repo, p).then((t) => {
-      const id = col(t, "path_id");
-      const la = col(t, "lines_a");
-      const lb = col(t, "lines_b");
-      const a = new Map<number, number>();
-      const b = new Map<number, number>();
-      for (let i = 0; i < id.length; i++) {
-        a.set(id[i], la[i]);
-        b.set(id[i], lb[i]);
+    const d = this.app.compare.data;
+    const W = this.width;
+    if (s.compare && d) {
+      if (s.compare.mode === "side") {
+        const half = (W - 8) / 2;
+        return [
+          { key: "A", label: `A · #${fmt.int(d.a + 1)} · ${fmt.date(this.app.tl.time(d.a))}`, tree: d.treeA, x: 0, w: half },
+          { key: "B", label: `B · #${fmt.int(d.b + 1)} · ${fmt.date(this.app.tl.time(d.b))}`, tree: d.treeB, x: half + 8, w: half },
+        ];
       }
-      this.compareData = { key, a, b };
-      this.invalidate();
-    }).catch(console.error);
+      return [{ key: "B", label: null, tree: d.treeB, x: 0, w: W }];
+    }
+    return [{ key: "L", label: null, tree: this.app.tree, x: 0, w: W }];
   }
 
   private relayout() {
     const s = this.app.store.get();
-    const tree = this.app.tree;
-    const display = tree.find(s.root) ?? tree.root;
-    const cmp = this.compareData;
-    const value = (n: TNode) => {
-      const f = n.file;
-      if (!f || f.binary) return 0;
-      return cmp ? (cmp.b.get(f.pathId) ?? f.lines) : f.lines;
-    };
-    const root = hierarchy<TNode>(display, (n) => (n.children ? stableChildren(n) : null)).sum(value);
-    const W = this.width;
-    const H = this.height;
-    treemap<TNode>()
-      .tile(treemapBinary)
-      .size([W, H])
-      .paddingOuter(2)
-      .paddingInner(1)
-      .paddingTop((n) => (n.depth > 0 && n.data.isDir && n.x1 - n.x0 > 60 && n.y1 - n.y0 > 36 ? 15 : n.depth === 0 ? 2 : 1))(root);
-    this.root = root as LNode;
-    this.nodes = this.root.descendants().filter((n) => n.x1 - n.x0 >= 0.3 && n.y1 - n.y0 >= 0.3 && n.value! > 0);
-    this.layoutRev = tree.rev;
+    const top = (spec: Omit<Pane, "root" | "nodes">) => (spec.label ? 16 : 0);
+    this.panes = this.paneSpecs().map((spec) => {
+      const display = spec.tree.find(s.root) ?? spec.tree.root;
+      const root = hierarchy<TNode>(display, (n) => (n.children ? stableChildren(n) : null)).sum((n) => (n.file && !n.file.binary ? n.file.lines : 0));
+      treemap<TNode>()
+        .tile(treemapBinary)
+        .size([spec.w, this.height - top(spec)])
+        .paddingOuter(2)
+        .paddingInner(1)
+        .paddingTop((n) => (n.depth > 0 && n.data.isDir && n.x1 - n.x0 > 60 && n.y1 - n.y0 > 36 ? 15 : n.depth === 0 ? 2 : 1))(root);
+      const r = root as LNode;
+      r.each((n) => {
+        n.x0 += spec.x;
+        n.x1 += spec.x;
+        n.y0 += top(spec);
+        n.y1 += top(spec);
+      });
+      const nodes = r.descendants().filter((n) => n.x1 - n.x0 >= 0.3 && n.y1 - n.y0 >= 0.3 && (n.value ?? 0) > 0);
+      return { ...spec, root: r, nodes };
+    });
+    this.layoutKey = this.currentKey();
     this.layoutAt = clock.now();
-    this.layoutW = W;
-    this.layoutH = H;
+  }
+
+  private currentKey(): string {
+    const s = this.app.store.get();
+    const specs = this.paneSpecs();
+    return `${this.width}x${this.height}|${s.root}|${specs.map((p) => `${p.key}:${p.tree.rev}`).join(",")}|${this.app.compare.data?.key ?? ""}`;
   }
 
   protected animating() {
@@ -147,19 +172,21 @@ export class TreemapView extends View {
 
   draw(p: Painter) {
     const pal = palette();
-    const tree = this.app.tree;
     const s = this.app.store.get();
     const now = clock.now();
-    const big = this.nodes.length > 20_000;
-    const throttle = s.playing ? (big ? 250 : 60) : 0;
-    const sizeChanged = this.width !== this.layoutW || this.height !== this.layoutH;
-    if (sizeChanged || (tree.rev !== this.layoutRev && now - this.layoutAt >= throttle)) this.relayout();
-    else if (tree.rev !== this.layoutRev) this.invalidate();
-    if (!this.root || !this.nodes.length) {
-      p.text(tree.step < 0 ? "Loading…" : "No files at this point", this.width / 2, this.height / 2, { color: pal.inkMuted, size: 12, align: "center" });
+    const nodeCount = this.panes.reduce((a, q) => a + q.nodes.length, 0);
+    const throttle = s.playing ? (nodeCount > 20_000 ? 250 : 60) : 0;
+    const key = this.currentKey();
+    const sizeChanged = !this.layoutKey.startsWith(`${this.width}x${this.height}|`);
+    if (key !== this.layoutKey) {
+      if (sizeChanged || now - this.layoutAt >= throttle) this.relayout();
+      else this.invalidate();
+    }
+    if (!this.panes.some((q) => q.nodes.length)) {
+      const msg = s.compare && !this.app.compare.data ? "Loading comparison…" : this.app.tree.step < 0 ? "Loading…" : "No files at this point";
+      p.text(msg, this.width / 2, this.height / 2, { color: pal.inkMuted, size: 12, align: "center" });
       return;
     }
-    // Ease shown rects toward the layout.
     const dt = this.lastFrame ? Math.min(100, now - this.lastFrame) : 16;
     this.lastFrame = now;
     const k = sizeChanged ? 1 : 1 - Math.exp(-dt / 70);
@@ -167,94 +194,91 @@ export class TreemapView extends View {
     const pos = s.pos;
     const colorBy = s.settings.colorBy;
     const searchPaths = s.search?.kind === "path" && s.search.paths.size ? s.search.paths : null;
-    const cmp = this.compareData;
+    const comparing = !!(s.compare && this.app.compare.data);
     const seen = new Set<string>();
-    for (const n of this.nodes) {
-      const id = n.data.id;
-      seen.add(id);
-      let r = this.shown.get(id);
-      if (!r) {
-        r = { x0: n.x0, y0: n.y0, x1: n.x1, y1: n.y1 };
-        this.shown.set(id, r);
-      } else if (k < 1) {
-        r.x0 += (n.x0 - r.x0) * k;
-        r.y0 += (n.y0 - r.y0) * k;
-        r.x1 += (n.x1 - r.x1) * k;
-        r.y1 += (n.y1 - r.y1) * k;
-        if (Math.abs(r.x0 - n.x0) + Math.abs(r.y0 - n.y0) + Math.abs(r.x1 - n.x1) + Math.abs(r.y1 - n.y1) > 0.6) moving = true;
-      } else {
-        r.x0 = n.x0; r.y0 = n.y0; r.x1 = n.x1; r.y1 = n.y1;
-      }
-      const w = r.x1 - r.x0;
-      const hh = r.y1 - r.y0;
-      if (n.data.isDir) {
-        if (n.depth === 0) continue;
-        p.rect(r.x0, r.y0, w, hh, pal.dir);
-        if (n.y0 + 15 <= n.children?.[0]?.y0! + 0.5 && w > 60) {
-          p.text(n.data.name, r.x0 + 4, r.y0 + 7.5, { color: pal.ink2, size: 10, weight: 600, baseline: "middle", maxWidth: w - 8 });
+    for (const pane of this.panes) {
+      if (pane.label) p.text(pane.label, pane.x + 4, 11, { color: pal.ink2, size: 11, weight: 600, maxWidth: pane.w - 8 });
+      for (const n of pane.nodes) {
+        const id = `${pane.key}:${n.data.id}`;
+        seen.add(id);
+        let r = this.shown.get(id);
+        if (!r) {
+          // A renamed file glides from where it used to be.
+          const from = pane.key === "L" ? pane.tree.renames.get(n.data.id) : undefined;
+          const prev = from ? this.shown.get(`${pane.key}:${from}`) : undefined;
+          r = prev ? { ...prev } : { x0: n.x0, y0: n.y0, x1: n.x1, y1: n.y1 };
+          this.shown.set(id, r);
         }
-        continue;
-      }
-      const f = n.data.file!;
-      let fill: string;
-      let alpha = 1;
-      if (cmp) {
-        const a = cmp.a.get(f.pathId) ?? 0;
-        const b = cmp.b.get(f.pathId) ?? f.lines;
-        fill = a === 0 ? pal.add : diverging(Math.log2((b + 1) / (a + 1)) / 3);
-      } else {
-        fill = fileColor(this.app, n.data, colorBy, pos);
-      }
-      if (searchPaths && !searchPaths.has(f.pathId)) alpha = 0.2;
-      p.rect(r.x0, r.y0, w, hh, fill, alpha);
-      // Activity cue in every mode: a brief ring on files touched right now.
-      if (colorBy !== "heat" && !cmp) {
-        const ht = heat(this.app, f.touched, pos);
-        if (ht > 0.15 && w > 2 && hh > 2) {
-          p.strokeRect(r.x0 + 0.75, r.y0 + 0.75, w - 1.5, hh - 1.5, f.lastDels > f.lastAdds ? pal.del : pal.add, 1.5, ht);
-          moving = moving || s.playing;
+        if (k < 1) {
+          r.x0 += (n.x0 - r.x0) * k;
+          r.y0 += (n.y0 - r.y0) * k;
+          r.x1 += (n.x1 - r.x1) * k;
+          r.y1 += (n.y1 - r.y1) * k;
+          if (Math.abs(r.x0 - n.x0) + Math.abs(r.y0 - n.y0) + Math.abs(r.x1 - n.x1) + Math.abs(r.y1 - n.y1) > 0.6) moving = true;
+        } else {
+          r.x0 = n.x0;
+          r.y0 = n.y0;
+          r.x1 = n.x1;
+          r.y1 = n.y1;
         }
-      } else if (colorBy === "heat" && heat(this.app, f.touched, pos) > 0.01) {
-        moving = moving || s.playing;
-      }
-      if (w > 46 && hh > 16) {
-        p.text(n.data.name, r.x0 + 4, r.y0 + 11, { color: inkOn(fill), size: 10, maxWidth: w - 8 });
+        const w = r.x1 - r.x0;
+        const hh = r.y1 - r.y0;
+        if (n.data.isDir) {
+          if (n.depth === 0) continue;
+          p.rect(r.x0, r.y0, w, hh, pal.dir);
+          const child = n.children?.[0];
+          if (child && child.y0 - n.y0 >= 14.5 && w > 60) {
+            p.text(n.data.name, r.x0 + 4, r.y0 + 7.5, { color: pal.ink2, size: 10, weight: 600, baseline: "middle", maxWidth: w - 8 });
+          }
+          continue;
+        }
+        const f = n.data.file!;
+        const fill = comparing ? growthColor(this.app, f.pathId) : fileColor(this.app, n.data, colorBy, pos);
+        const alpha = searchPaths && !searchPaths.has(f.pathId) ? 0.2 : 1;
+        p.rect(r.x0, r.y0, w, hh, fill, alpha);
+        // Activity cue in every mode: a brief ring on files touched right now.
+        if (!comparing) {
+          const ht = heat(this.app, f.touched, pos);
+          if (colorBy !== "heat" && ht > 0.15 && w > 2 && hh > 2) {
+            p.strokeRect(r.x0 + 0.75, r.y0 + 0.75, w - 1.5, hh - 1.5, f.lastDels > f.lastAdds ? pal.del : pal.add, 1.5, ht);
+          }
+          if (ht > 0.05) moving ||= s.playing;
+        }
+        if (w > 46 && hh > 16) p.text(n.data.name, r.x0 + 4, r.y0 + 11, { color: inkOn(fill), size: 10, maxWidth: w - 8 });
       }
     }
     if (this.shown.size > seen.size * 1.5 + 100) {
       for (const id of this.shown.keys()) if (!seen.has(id)) this.shown.delete(id);
     }
     if (this.hover) {
-      const r = this.shown.get(this.hover.data.id);
+      const r = this.shown.get(`${this.hover.pane.key}:${this.hover.node.data.id}`);
       if (r) p.strokeRect(r.x0 + 0.5, r.y0 + 0.5, r.x1 - r.x0 - 1, r.y1 - r.y0 - 1, pal.ink, 1.5);
     }
     this.moving = moving;
   }
 
-  /** Set during export so every frame is fully settled. */
-  exporting = false;
-
-  private hit(x: number, y: number): LNode | null {
-    let n = this.root;
-    if (!n) return null;
+  private hit(x: number, y: number): { pane: Pane; node: LNode } | null {
+    const pane = this.panes.find((q) => x >= q.x && x <= q.x + q.w);
+    let n = pane?.root;
+    if (!pane || !n) return null;
     for (;;) {
-      const next: LNode | undefined = n.children?.find((c) => x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1) as LNode | undefined;
-      if (!next) return n.depth === 0 ? null : n;
+      const next = n.children?.find((c) => x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1) as LNode | undefined;
+      if (!next) return n.depth === 0 ? null : { pane, node: n };
       n = next;
     }
   }
 
   protected onPointerMove(x: number, y: number, e: PointerEvent) {
-    const n = this.hit(x, y);
-    if (n !== this.hover) {
-      this.hover = n;
+    const hit = this.hit(x, y);
+    if (hit?.node !== this.hover?.node) {
+      this.hover = hit;
       this.invalidate();
     }
-    if (!n) {
+    if (!hit) {
       tooltip.hide();
       return;
     }
-    tooltip.show(e.clientX, e.clientY, this.describe(n));
+    tooltip.show(e.clientX, e.clientY, this.describe(hit.node));
   }
 
   private describe(n: LNode): HTMLElement {
@@ -267,12 +291,15 @@ export class TreemapView extends View {
     }
     const f = n.data.file!;
     const lang = this.app.paths.lang[f.pathId];
-    box.append(tipRow(colorMaps.lang.color(lang), fmt.int(f.lines), `lines · ${lang}`));
-    const cmp = this.compareData;
-    if (cmp) {
-      const a = cmp.a.get(f.pathId) ?? 0;
-      box.append(tipRow(null, fmt.signed(f.lines - a), `since #${fmt.int(this.app.store.get().compare!.a + 1)} (was ${fmt.int(a)})`));
+    const d = this.app.compare.data;
+    if (this.app.store.get().compare && d) {
+      const a = d.linesA.get(f.pathId) ?? 0;
+      const b = d.linesB.get(f.pathId) ?? 0;
+      box.append(tipRow(growthColor(this.app, f.pathId), fmt.signed(b - a), `lines (${fmt.int(a)} → ${fmt.int(b)})`));
+      box.append(h("div", { class: "sub", text: a === 0 ? "new since A" : b === 0 ? "deleted by B" : lang }));
+      return box;
     }
+    box.append(tipRow(colorMaps.lang.color(lang), fmt.int(f.lines), `lines · ${lang}`));
     if (f.topAuthor >= 0) {
       const name = this.app.authorName(f.topAuthor);
       box.append(tipRow(colorMaps.author.color(name), `${Math.round(f.topShare * 100)}%`, `written by ${name}`));
@@ -291,8 +318,9 @@ export class TreemapView extends View {
   }
 
   protected onPointerDown(x: number, y: number) {
-    const n = this.hit(x, y);
-    if (!n) return;
+    const hit = this.hit(x, y);
+    if (!hit) return;
+    const n = hit.node;
     const dir = n.data.isDir ? n.data : n.data.parent;
     if (dir && dir.id !== this.app.store.get().root) {
       tooltip.hide();

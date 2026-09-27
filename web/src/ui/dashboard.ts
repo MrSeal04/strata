@@ -2,6 +2,7 @@ import { type Author, api, boolCol, col } from "../api/client";
 import type { App } from "../app";
 import { openExportMenu } from "../export/menu";
 import { colorMaps } from "../model/colors";
+import { CompareCache } from "../model/compare";
 import { FileTree, Paths } from "../model/filetree";
 import { StateSync } from "../model/sync";
 import { DEFAULT_SETTINGS, Store, initialState, loadSettings, saveSettings } from "../state/store";
@@ -58,6 +59,7 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
     authors,
     authorName: (id) => byId.get(id)?.name ?? (id >= 0 ? `author ${id}` : "unknown"),
     openCommit: (step) => void openCommit(app, step),
+    compare: new CompareCache(store, repo, paths),
     exportRate: null,
     stepsPerSecond: () => {
       if (app.exportRate) return app.exportRate;

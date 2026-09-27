@@ -1,4 +1,5 @@
 import type { Author, RepoMeta, Summary } from "./api/client";
+import type { CompareCache } from "./model/compare";
 import type { FileTree, Paths } from "./model/filetree";
 import type { StateSync } from "./model/sync";
 import type { Store } from "./state/store";
@@ -21,6 +22,7 @@ export interface App {
   openCommit(step: number): void;
   /** Playback speed in steps per second for the current mode (for heat decay). */
   stepsPerSecond(): number;
+  compare: CompareCache;
   /** Set by the video exporter so heat decays at the video's pace. */
   exportRate: number | null;
 }
