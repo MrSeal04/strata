@@ -680,23 +680,33 @@ impl Db {
                  b AS (SELECT {bin} AS bin, k0.key, sum(v)::BIGINT AS v, sum(a)::BIGINT AS a, sum(d)::BIGINT AS d
                        FROM k0 JOIN {s}.steps s USING (step) WHERE {below_hi} GROUP BY ALL)"
             );
+            // Labels (author names, cohort dates) are resolved for the top keys only, then joined.
             let sql = match q.mode {
-                AreaMode::Size => format!(
-                    "{base},
-                     cum AS (SELECT key, bin, sum(v) OVER (PARTITION BY key ORDER BY bin ROWS UNBOUNDED PRECEDING) AS c FROM b),
-                     rk AS (SELECT key FROM cum GROUP BY key ORDER BY max(c) DESC, key LIMIT {top}),
-                     g AS (SELECT bin, CASE WHEN key IN (SELECT key FROM rk) THEN {label} ELSE '(other)' END AS key,
-                                  sum(v)::BIGINT AS v
-                           FROM b GROUP BY ALL)
-                     SELECT bin, key, (sum(v) OVER (PARTITION BY key ORDER BY bin ROWS UNBOUNDED PRECEDING))::DOUBLE AS value
-                     FROM g ORDER BY bin, key"
-                ),
+                AreaMode::Size => {
+                    // Rank by peak size; for authors (tens of thousands of keys on big repos) by
+                    // surviving lines at the end of the range, which needs no per-key window.
+                    let rank = if q.slice == Slice::Author {
+                        format!("SELECT key FROM b GROUP BY key ORDER BY sum(v) DESC, key LIMIT {top}")
+                    } else {
+                        format!(
+                            "SELECT key FROM (SELECT key, sum(v) OVER (PARTITION BY key ORDER BY bin ROWS UNBOUNDED PRECEDING) AS c FROM b)
+                             GROUP BY key ORDER BY max(c) DESC, key LIMIT {top}"
+                        )
+                    };
+                    format!(
+                        "{base},
+                         rk AS (SELECT key, {label} AS label FROM ({rank})),
+                         g AS (SELECT b.bin, coalesce(rk.label, '(other)') AS key, sum(b.v)::BIGINT AS v
+                               FROM b LEFT JOIN rk USING (key) GROUP BY ALL)
+                         SELECT bin, key, (sum(v) OVER (PARTITION BY key ORDER BY bin ROWS UNBOUNDED PRECEDING))::DOUBLE AS value
+                         FROM g ORDER BY bin, key"
+                    )
+                }
                 AreaMode::Flow => format!(
                     "{base},
-                     rk AS (SELECT key FROM b WHERE bin >= 0 GROUP BY key ORDER BY sum(a + d) DESC, key LIMIT {top})
-                     SELECT bin, CASE WHEN key IN (SELECT key FROM rk) THEN {label} ELSE '(other)' END AS key,
-                            sum(a)::DOUBLE AS adds, sum(d)::DOUBLE AS dels
-                     FROM b WHERE bin >= 0 GROUP BY ALL ORDER BY bin, key"
+                     rk AS (SELECT key, {label} AS label FROM (SELECT key FROM b WHERE bin >= 0 GROUP BY key ORDER BY sum(a + d) DESC, key LIMIT {top}))
+                     SELECT b.bin, coalesce(rk.label, '(other)') AS key, sum(b.a)::DOUBLE AS adds, sum(b.d)::DOUBLE AS dels
+                     FROM b LEFT JOIN rk USING (key) WHERE b.bin >= 0 GROUP BY ALL ORDER BY bin, key"
                 ),
             };
             self.ipc_cached(c, &sql)

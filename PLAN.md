@@ -551,7 +551,7 @@ Linux (77,194 first-parent steps; the scale target):
 |---|---|
 | Extraction ≤ 60 min | Met: ~36 min, plus ~30 min to clone. The run was interrupted once and resumed on a newer engine. |
 | Peak RSS ≤ 4 GB | Met: 1.0–1.6 GB anonymous memory, plus the memory-mapped pack, which is reclaimable. |
-| UI queries ≤ 300 ms p95 | Mostly met: area and bar queries use lazy aggregates and a result cache, and cached calls take < 10 ms. Cold message and path search can exceed it (0.3–1 s), and runs under heavy memory pressure spiked higher. |
+| UI queries ≤ 300 ms p95 | Met at p50: every cold query is at or under ~285 ms (area by author 274 ms, message search 285 ms), and cached calls take < 3 ms. Over it at cold p95: the first area query per slice builds its aggregate once (up to ~490 ms), and message search reaches ~310 ms. Measured at load average ~15. |
 | Playback ≥ 30 fps with LOD | Not met: ~17 fps in Chrome on the desktop GPU with ~60k cells, measured at load average 15. A WebGL treemap layer and LOD got it there from 3.4 fps. |
 | Survival within tolerance of blame | git/git 99.1% of lines. Linux 90.1% on 20 files: the most recent 16k steps were extracted before merge-aware replay existed. Re-extract with `--full` to re-check. |
 
