@@ -152,10 +152,19 @@ pub fn extract_source(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(&JobProgress),
 ) -> anyhow::Result<RepoMeta> {
-    let git_dir = prepare_git_dir(layout, source, fetch, progress)?;
     let id = source.id();
     let dir = layout.repo_dir(&id);
     std::fs::create_dir_all(&dir)?;
+    // One extraction per repo at a time (CLI and server can both start one).
+    let lock = std::fs::File::create(dir.join("extract.lock"))?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            bail!("another extraction of {} is already running", source.name())
+        }
+        Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+    }
+    let git_dir = prepare_git_dir(layout, source, fetch, progress)?;
     let repo_cfg = git_dir.join(".strata.toml");
     let cache_cfg = dir.join("strata.toml");
     let cfg = RepoConfig::load(&[&repo_cfg, &cache_cfg])?;

@@ -80,12 +80,38 @@ pub struct SideCommit {
 /// Maps every commit in the analyzed history to the first-parent step that landed it.
 #[derive(Default)]
 pub struct Landing {
-    map: FxHashMap<ObjectId, Step>,
+    /// commit -> (landing step, is a first-parent chain commit)
+    map: FxHashMap<ObjectId, (Step, bool)>,
 }
 
 impl Landing {
     pub fn step_of(&self, id: &ObjectId) -> Option<Step> {
-        self.map.get(id).copied()
+        self.map.get(id).map(|e| e.0)
+    }
+
+    pub fn on_main(&self, id: &ObjectId) -> bool {
+        self.map.get(id).is_some_and(|e| e.1)
+    }
+
+    /// Serializable form, keeping only commits landed before `until` (for checkpoints).
+    pub fn to_rows(&self, until: Step) -> Vec<(Vec<u8>, Step, bool)> {
+        self.map
+            .iter()
+            .filter(|(_, (s, _))| *s < until)
+            .map(|(id, (s, main))| (id.as_bytes().to_vec(), *s, *main))
+            .collect()
+    }
+
+    pub fn from_rows(rows: Vec<(Vec<u8>, Step, bool)>) -> Self {
+        let map = rows
+            .into_iter()
+            .filter_map(|(b, s, m)| Some((ObjectId::try_from(b.as_slice()).ok()?, (s, m))))
+            .collect();
+        Self { map }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 
     /// Record chain commit `id` at `step` and collect the side commits its extra parents bring in.
@@ -97,7 +123,7 @@ impl Landing {
         extra_parents: &[ObjectId],
         with_meta: bool,
     ) -> anyhow::Result<Vec<SideCommit>> {
-        self.map.insert(id, step);
+        self.map.insert(id, (step, true));
         let mut side = Vec::new();
         let mut stack: Vec<ObjectId> = extra_parents.to_vec();
         while let Some(cid) = stack.pop() {
@@ -107,7 +133,7 @@ impl Landing {
             let Ok(commit) = repo.find_commit(cid) else {
                 continue;
             };
-            self.map.insert(cid, step);
+            self.map.insert(cid, (step, false));
             let c = commit.decode()?;
             let parents: Vec<ObjectId> = c.parents().collect();
             stack.extend(parents.iter().copied());

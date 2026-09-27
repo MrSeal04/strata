@@ -326,4 +326,30 @@ fn incremental_resume_matches_full() {
             .unwrap()
     };
     assert_eq!(dump(&layout, &id), dump(&full_layout, &fid));
+    let dump_other = |layout: &Layout, id: &str| -> Vec<String> {
+        Db::new(layout.clone())
+            .unwrap()
+            .with(id, |c, s| {
+                let mut stmt = c.prepare(&format!(
+                    "SELECT concat_ws(',', 'd', step, path_id, cohort, author_id, delta) FROM {s}.origin_deltas
+                     UNION ALL SELECT concat_ws(',', 't', name, step, on_main) FROM {s}.tags ORDER BY 1"
+                ))?;
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            })
+            .unwrap()
+    };
+    assert_eq!(dump_other(&layout, &id), dump_other(&full_layout, &fid));
+    assert!(
+        dump_other(&layout, &id)
+            .iter()
+            .any(|r| r == "t,v1.0,4,true"),
+        "tag placed after resume"
+    );
+
+    // Nothing new: returns at once, cache untouched.
+    extract(&layout, &repo);
+    let meta = layout.read_meta(&id).unwrap();
+    assert_eq!(meta.last_run["steps_new"], 0);
+    assert_eq!(meta.steps, 6);
 }

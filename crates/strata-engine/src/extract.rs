@@ -22,7 +22,7 @@ use crate::model::*;
 use crate::tracker::{DeltaAcc, OriginId, Tracker};
 use crate::walk::{self, Landing};
 
-const CHECKPOINT_FORMAT: u32 = 1;
+const CHECKPOINT_FORMAT: u32 = 2;
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Debug)]
@@ -113,6 +113,8 @@ struct Checkpoint {
     identities: Vec<RawIdentity>,
     tracker: Tracker,
     rows_since_keyframe: u64,
+    /// commit -> landing step (empty in periodic checkpoints; rebuilt by a history walk then).
+    landing: Vec<(Vec<u8>, Step, bool)>,
 }
 
 fn checkpoint_path(state_dir: &Path) -> PathBuf {
@@ -426,10 +428,31 @@ pub fn extract(
         cp = None;
         chain = walk::first_parent_chain(&repo, tip, None)?;
     }
-    // Rebuild the landing map (commit -> step) for the already-extracted part of history.
+    // Nothing new on the branch: the cache is already current.
+    if let (Some(c), true) = (cp.as_ref(), chain.resumed && chain.ids.is_empty()) {
+        return Ok(ExtractReport {
+            branch,
+            head: c.last_sha.clone(),
+            steps_total: c.next_step,
+            steps_new: 0,
+            resumed: true,
+            full_reason: None,
+            cancelled: false,
+            inconsistent_files: 0,
+            elapsed_secs: started.elapsed().as_secs_f64(),
+            first_time: c.first_time,
+            last_time: c.axis_max,
+            blame_calls: 0,
+            blame_shortcuts: 0,
+        });
+    }
+    // The landing map (commit -> step) for the already-extracted history: from the checkpoint,
+    // or (after an interrupted run) rebuilt by walking it.
     let mut landing = Landing::default();
-    let mut chain_ids: Vec<ObjectId> = Vec::new();
-    if let (Some(stop), Some(c)) = (stop, cp.as_ref()) {
+    if let Some(c) = cp.as_mut() {
+        landing = Landing::from_rows(std::mem::take(&mut c.landing));
+    }
+    if let (Some(stop), Some(c), true) = (stop, cp.as_ref(), landing.is_empty()) {
         progress(&Progress {
             phase: "reindex",
             done: 0,
@@ -457,12 +480,12 @@ pub fn extract(
                     false,
                 )?;
             }
-            chain_ids = old.ids;
         }
     }
-    chain_ids.extend_from_slice(&chain.ids);
     let resumed = cp.is_some();
     let start_step = cp.as_ref().map_or(0, |c| c.next_step);
+    let prev_head = cp.as_ref().map(|c| c.last_sha.clone()).unwrap_or_default();
+    let sha_at = |step: Step| chain.ids[(step - start_step) as usize];
 
     let mailmap = repo.open_mailmap();
     let mut st = match cp {
@@ -601,13 +624,7 @@ pub fn extract(
                         sink.flush()?;
                         save_checkpoint(
                             state_dir,
-                            &snapshot(
-                                &st,
-                                &fingerprint,
-                                &branch,
-                                next,
-                                chain_ids[next as usize - 1],
-                            ),
+                            &snapshot(&st, &fingerprint, &branch, next, sha_at(next - 1), None),
                         )?;
                         last_cp = Instant::now();
                     }
@@ -667,7 +684,7 @@ pub fn extract(
         .filter_map(|t| {
             let step = landing.step_of(&t.commit)?;
             (step < steps_done_to).then(|| TagRow {
-                on_main: chain_ids.get(step as usize) == Some(&t.commit),
+                on_main: landing.on_main(&t.commit),
                 name: t.name,
                 sha: t.commit.to_string(),
                 step,
@@ -681,7 +698,7 @@ pub fn extract(
         authors,
         tags,
     })?;
-    if steps_done_to > 0 {
+    if steps_done_to > start_step {
         save_checkpoint(
             state_dir,
             &snapshot(
@@ -689,17 +706,19 @@ pub fn extract(
                 &fingerprint,
                 &branch,
                 steps_done_to,
-                chain_ids[steps_done_to as usize - 1],
+                sha_at(steps_done_to - 1),
+                Some(&landing),
             ),
         )?;
     }
 
     Ok(ExtractReport {
         branch,
-        head: chain_ids
-            .get(steps_done_to.saturating_sub(1) as usize)
-            .map(|i| i.to_string())
-            .unwrap_or_default(),
+        head: if steps_done_to > start_step {
+            sha_at(steps_done_to - 1).to_string()
+        } else {
+            prev_head
+        },
         steps_total: steps_done_to,
         steps_new: done as u32,
         resumed,
@@ -720,6 +739,7 @@ fn snapshot<'a>(
     branch: &str,
     next_step: Step,
     last: ObjectId,
+    landing: Option<&Landing>,
 ) -> SnapshotRef<'a> {
     SnapshotRef {
         format: CHECKPOINT_FORMAT,
@@ -733,6 +753,7 @@ fn snapshot<'a>(
         identities: st.ids.raw(),
         tracker: &st.tracker,
         rows_since_keyframe: st.rows_since_keyframe,
+        landing: landing.map(|l| l.to_rows(next_step)).unwrap_or_default(),
     }
 }
 
@@ -750,6 +771,7 @@ struct SnapshotRef<'a> {
     identities: &'a [RawIdentity],
     tracker: &'a Tracker,
     rows_since_keyframe: u64,
+    landing: Vec<(Vec<u8>, Step, bool)>,
 }
 
 fn save_checkpoint(state_dir: &Path, cp: &SnapshotRef<'_>) -> anyhow::Result<()> {

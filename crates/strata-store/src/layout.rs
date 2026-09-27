@@ -34,7 +34,17 @@ impl Source {
         let p = Path::new(s);
         if p.exists() {
             let path = p.canonicalize().with_context(|| format!("resolving {s}"))?;
-            return Ok(Source::Path { path });
+            // A path inside a working tree means its repository.
+            let root = path
+                .ancestors()
+                .find(|a| {
+                    a.join(".git").exists()
+                        || (a.join("HEAD").is_file() && a.join("objects").is_dir())
+                })
+                .with_context(|| format!("{s}: not inside a git repository"))?;
+            return Ok(Source::Path {
+                path: root.to_path_buf(),
+            });
         }
         let looks_remote = s.contains("://") || (s.contains('@') && s.contains(':'));
         anyhow::ensure!(looks_remote, "{s}: not a directory or a git URL");

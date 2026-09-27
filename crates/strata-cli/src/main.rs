@@ -170,7 +170,20 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Ctrl-C / SIGTERM: ask the engine to checkpoint and stop (a second signal exits at once).
+static CANCEL: AtomicBool = AtomicBool::new(false);
+
+fn handle_signals() {
+    let _ = ctrlc::set_handler(|| {
+        if CANCEL.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            std::process::exit(130);
+        }
+        eprintln!("\nstopping after the current step (checkpointing)…");
+    });
+}
+
 fn cmd_extract(layout: &Layout, source: &str, args: &ExtractArgs) -> anyhow::Result<()> {
+    handle_signals();
     let source = Source::parse(source)?;
     let mut reporter = progress::Reporter::new(
         args.progress == ProgressMode::Json,
@@ -181,11 +194,14 @@ fn cmd_extract(layout: &Layout, source: &str, args: &ExtractArgs) -> anyhow::Res
         &source,
         &args.options(),
         !args.no_fetch,
-        &AtomicBool::new(false),
+        &CANCEL,
         &mut |p| reporter.update(p),
     )?;
     reporter.finish();
     let run = &meta.last_run;
+    if run["cancelled"] == true {
+        eprintln!("stopped early; run the same command again to continue from the checkpoint");
+    }
     eprintln!(
         "{}: {} steps on {} ({} new{}) in {:.1}s -> {}",
         meta.name,
