@@ -85,6 +85,9 @@ pub struct ExtractReport {
     pub elapsed_secs: f64,
     pub first_time: i64,
     pub last_time: i64,
+    /// Merge attribution work: files run through `git blame` / credited by the single-commit shortcut.
+    pub blame_calls: u64,
+    pub blame_shortcuts: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -164,6 +167,16 @@ impl State {
     }
 }
 
+/// Bound gix's per-handle caches (the defaults, ~96 MB of pack cache per thread, add up fast).
+fn limit_caches(repo: &mut gix::Repository, pack_bytes: usize, object_bytes: usize) {
+    repo.objects.set_pack_cache(move || {
+        Box::new(gix::odb::pack::cache::lru::StaticLinkedList::<64>::new(
+            pack_bytes,
+        ))
+    });
+    repo.object_cache_size(object_bytes);
+}
+
 fn sig_ref(s: &crate::diff::Signature) -> gix::actor::SignatureRef<'_> {
     gix::actor::SignatureRef {
         name: s.name.as_bstr(),
@@ -173,12 +186,7 @@ fn sig_ref(s: &crate::diff::Signature) -> gix::actor::SignatureRef<'_> {
 }
 
 /// Turn one diffed step into rows, updating the tracker.
-fn process_step(
-    st: &mut State,
-    landing: &mut Landing,
-    repo: &gix::Repository,
-    d: StepDiff,
-) -> anyhow::Result<StepOutput> {
+fn process_step(st: &mut State, d: StepDiff) -> anyhow::Result<StepOutput> {
     let step = d.step;
     let c = &d.commit;
     let author_id = st.ids.resolve(sig_ref(&c.author), true);
@@ -188,21 +196,15 @@ fn process_step(
         st.first_time = c.committer.time;
     }
 
-    let side = landing.land(
-        repo,
-        step,
-        c.id,
-        c.parents.get(1..).unwrap_or_default(),
-        true,
-    )?;
-    let side_commits: Vec<SideCommitRow> = side
-        .into_iter()
+    let side_commits: Vec<SideCommitRow> = d
+        .side
+        .iter()
         .map(|s| SideCommitRow {
             sha: s.id.to_string(),
             landing_step: step,
             author_id: st.ids.resolve(sig_ref(&s.author), true),
             author_time: s.author.time,
-            summary: s.summary,
+            summary: s.summary.clone(),
         })
         .collect();
 
@@ -381,10 +383,11 @@ pub fn extract(
     progress: &mut dyn FnMut(&Progress),
 ) -> anyhow::Result<ExtractReport> {
     let started = Instant::now();
+    let blame0 = crate::blame::counters();
     std::fs::create_dir_all(state_dir)?;
     let mut repo =
         gix::open(repo_dir).with_context(|| format!("opening {}", repo_dir.display()))?;
-    repo.object_cache_size_if_unset(64 << 20);
+    limit_caches(&mut repo, 32 << 20, 16 << 20);
     progress(&Progress {
         phase: "walk",
         done: 0,
@@ -496,7 +499,7 @@ pub fn extract(
     let threads = opts.threads.max(1);
     let window = threads * 8;
     let safe = repo.clone().into_sync();
-    let (job_tx, job_rx) = bounded::<(Step, ObjectId)>(threads * 2);
+    let (job_tx, job_rx) = bounded::<(Step, ObjectId, Vec<walk::SideCommit>)>(threads * 2);
     let (res_tx, res_rx) = unbounded::<anyhow::Result<StepDiff>>();
     let (permit_tx, permit_rx) = bounded::<()>(window);
     for _ in 0..window {
@@ -510,14 +513,28 @@ pub fn extract(
     let mut ema_rate: Option<f64> = None;
     let mut rate_mark = (Instant::now(), 0u64);
 
-    let run: anyhow::Result<()> = std::thread::scope(|s| {
+    let run: anyhow::Result<Landing> = std::thread::scope(|s| {
         let ids = &chain.ids;
-        s.spawn(move || {
+        let feeder_repo = safe.clone();
+        // The feeder walks the chain in order, discovering each merge's side commits (it owns
+        // the landing map), and hands workers their jobs within the reorder window.
+        let feeder = s.spawn(move || -> anyhow::Result<Landing> {
+            let mut repo = feeder_repo.to_thread_local();
+            limit_caches(&mut repo, 16 << 20, 4 << 20);
+            let mut landing = landing;
             for (i, &id) in ids.iter().enumerate() {
-                if permit_rx.recv().is_err() || job_tx.send((start_step + i as Step, id)).is_err() {
+                let step = start_step + i as Step;
+                let parents: Vec<ObjectId> = match repo.find_commit(id) {
+                    Ok(c) => c.parent_ids().map(|p| p.detach()).collect(),
+                    Err(_) => Vec::new(),
+                };
+                let side =
+                    landing.land(&repo, step, id, parents.get(1..).unwrap_or_default(), true)?;
+                if permit_rx.recv().is_err() || job_tx.send((step, id, side)).is_err() {
                     break;
                 }
             }
+            Ok(landing)
         });
         for _ in 0..threads {
             let job_rx = job_rx.clone();
@@ -526,7 +543,7 @@ pub fn extract(
             let dopts = opts.diff.clone();
             s.spawn(move || {
                 let mut repo = safe.to_thread_local();
-                repo.object_cache_size_if_unset(32 << 20);
+                limit_caches(&mut repo, 24 << 20, 8 << 20);
                 let mut worker = match DiffWorker::new(repo, dopts) {
                     Ok(w) => w,
                     Err(e) => {
@@ -534,8 +551,8 @@ pub fn extract(
                         return;
                     }
                 };
-                while let Ok((step, id)) = job_rx.recv() {
-                    if res_tx.send(worker.run(step, id)).is_err() {
+                while let Ok((step, id, side)) = job_rx.recv() {
+                    if res_tx.send(worker.run(step, id, side)).is_err() {
                         break;
                     }
                 }
@@ -551,7 +568,7 @@ pub fn extract(
                 let d = res?;
                 pending.insert(d.step, d);
                 while let Some(d) = pending.remove(&next) {
-                    let out = process_step(&mut st, &mut landing, &repo, d)?;
+                    let out = process_step(&mut st, d)?;
                     st.rows_since_keyframe += out.changes.len() as u64;
                     sink.write_step(out)?;
                     if st.rows_since_keyframe >= (2 * st.tracker.live_files() as u64).max(50_000) {
@@ -604,9 +621,12 @@ pub fn extract(
         })();
         drop(permit_tx);
         drop(res_rx);
-        result
+        let landing = feeder
+            .join()
+            .map_err(|_| anyhow::anyhow!("feeder thread panicked"))??;
+        result.map(|()| landing)
     });
-    run?;
+    let landing = run?;
 
     let steps_done_to = start_step + done as Step;
     progress(&Progress {
@@ -689,6 +709,8 @@ pub fn extract(
         elapsed_secs: started.elapsed().as_secs_f64(),
         first_time: st.first_time,
         last_time: st.axis_max,
+        blame_calls: crate::blame::counters().0 - blame0.0,
+        blame_shortcuts: crate::blame::counters().1 - blame0.1,
     })
 }
 

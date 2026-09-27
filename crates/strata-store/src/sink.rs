@@ -33,7 +33,7 @@ CREATE TABLE tags (name VARCHAR, sha VARCHAR, step UINTEGER, time BIGINT, on_mai
 
 const COPY_OPTS: &str = "(FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 122880)";
 /// Buffered rows (all tables) that trigger a part write.
-const FLUSH_ROWS: usize = 600_000;
+const FLUSH_ROWS: usize = 250_000;
 
 pub struct ParquetSink {
     dir: PathBuf,
@@ -61,6 +61,8 @@ impl ParquetSink {
     pub fn new(dir: &Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let conn = Connection::open_in_memory()?;
+        // A small, bounded staging database: rows only pass through on their way to Parquet.
+        conn.execute_batch("SET threads = 2; SET memory_limit = '256MB';")?;
         conn.execute_batch(DDL)?;
         Ok(Self {
             dir: dir.to_path_buf(),

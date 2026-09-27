@@ -1,6 +1,6 @@
 //! Terminal progress: a redrawn status line, or JSON lines for machines (e.g. the status panel).
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use strata_store::pipeline::JobProgress;
@@ -8,6 +8,8 @@ use strata_store::pipeline::JobProgress;
 pub struct Reporter {
     json: bool,
     quiet: bool,
+    /// stderr is a terminal: redraw one status line; otherwise print a line every few seconds.
+    tty: bool,
     last: Option<Instant>,
     drew: bool,
 }
@@ -26,6 +28,7 @@ impl Reporter {
         Self {
             json,
             quiet,
+            tty: std::io::stderr().is_terminal(),
             last: None,
             drew: false,
         }
@@ -65,9 +68,13 @@ impl Reporter {
             }
             (phase, _) => format!("{phase}..."),
         };
-        let _ = write!(err, "\r\x1b[2K{line}");
+        if self.tty {
+            let _ = write!(err, "\r\x1b[2K{line}");
+            self.drew = true;
+        } else {
+            let _ = writeln!(err, "{line}");
+        }
         let _ = err.flush();
-        self.drew = true;
     }
 
     pub fn finish(&mut self) {

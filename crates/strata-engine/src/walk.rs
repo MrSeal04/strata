@@ -73,6 +73,8 @@ pub struct SideCommit {
     pub id: ObjectId,
     pub author: Signature,
     pub summary: String,
+    pub first_parent: Option<ObjectId>,
+    pub is_merge: bool,
 }
 
 /// Maps every commit in the analyzed history to the first-parent step that landed it.
@@ -107,10 +109,13 @@ impl Landing {
             };
             self.map.insert(cid, step);
             let c = commit.decode()?;
-            stack.extend(c.parents());
+            let parents: Vec<ObjectId> = c.parents().collect();
+            stack.extend(parents.iter().copied());
             if with_meta {
                 side.push(SideCommit {
                     id: cid,
+                    first_parent: parents.first().copied(),
+                    is_merge: parents.len() > 1,
                     author: read_signature(c.author()?),
                     summary: c
                         .message

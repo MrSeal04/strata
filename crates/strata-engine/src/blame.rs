@@ -2,6 +2,18 @@
 //! commit that wrote them with `git blame --incremental <P1>..<M>` limited to the added ranges.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Process-wide counters (reported by extraction): files blamed vs. credited via the shortcut.
+pub static BLAME_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static BLAME_SHORTCUTS: AtomicU64 = AtomicU64::new(0);
+
+pub fn counters() -> (u64, u64) {
+    (
+        BLAME_CALLS.load(Ordering::Relaxed),
+        BLAME_SHORTCUTS.load(Ordering::Relaxed),
+    )
+}
 use std::path::Path;
 use std::process::Command;
 
@@ -52,6 +64,7 @@ pub fn blame_added(
     if !any {
         return Ok(Vec::new());
     }
+    BLAME_CALLS.fetch_add(1, Ordering::Relaxed);
     let path_os: &std::ffi::OsStr = &path.to_os_str_lossy();
     cmd.arg(format!("{first_parent}..{merge}"))
         .arg("--")

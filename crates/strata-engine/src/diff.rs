@@ -82,6 +82,16 @@ pub struct FileDiff {
     pub hunks: Vec<Hunk>,
     /// Merge steps: who wrote the added lines (see `blame`).
     pub blame: Option<Vec<crate::blame::BlameRun>>,
+    /// Blob id after the change (None for deletions / trees).
+    pub new_id: Option<ObjectId>,
+}
+
+/// One side commit's change to a path (old/new blob ids; None = absent).
+#[derive(Clone, Copy, Debug)]
+struct Touch {
+    side: usize,
+    old: Option<ObjectId>,
+    new: Option<ObjectId>,
 }
 
 #[derive(Debug)]
@@ -89,6 +99,8 @@ pub struct StepDiff {
     pub step: Step,
     pub commit: CommitInfo,
     pub files: Vec<FileDiff>,
+    /// Commits this (merge) step brings in from its other parents.
+    pub side: Vec<crate::walk::SideCommit>,
 }
 
 pub fn read_signature(sig: gix::actor::SignatureRef<'_>) -> Signature {
@@ -206,7 +218,12 @@ impl DiffWorker {
             .take_data())
     }
 
-    pub fn run(&mut self, step: Step, id: ObjectId) -> anyhow::Result<StepDiff> {
+    pub fn run(
+        &mut self,
+        step: Step,
+        id: ObjectId,
+        side: Vec<crate::walk::SideCommit>,
+    ) -> anyhow::Result<StepDiff> {
         let (mut commit, tree_id) = read_commit(&self.repo, id)?;
         let new_tree = self.repo.find_tree(tree_id)?;
         let old_tree = match commit.parents.first() {
@@ -220,7 +237,8 @@ impl DiffWorker {
             None => None,
         };
         let empty = self.repo.empty_tree();
-        let old_tree = old_tree.as_ref().unwrap_or(&empty);
+        let old_tree_owned = old_tree;
+        let old_tree = old_tree_owned.as_ref().unwrap_or(&empty);
 
         let mut changes: Vec<Change> = Vec::new();
         let opts = TreeDiffOptions {
@@ -244,6 +262,7 @@ impl DiffWorker {
         )
         .map_err(|e| anyhow::anyhow!("tree diff of {id}: {e}"))?;
         self.cache.clear_resource_cache_keep_allocation();
+        drop((new_tree, old_tree_owned, empty));
 
         let mut files = Vec::with_capacity(changes.len());
         for change in changes {
@@ -252,17 +271,231 @@ impl DiffWorker {
             }
         }
         if self.opts.merge_blame && commit.parents.len() > 1 && !commit.shallow_root {
-            self.attribute_merge(&commit, &mut files);
+            self.attribute_merge(&commit, &side, &mut files)?;
         }
         Ok(StepDiff {
             step,
             commit,
             files,
+            side,
         })
     }
 
-    /// Blame the lines this merge adds against its first parent, file by file.
-    fn attribute_merge(&self, commit: &CommitInfo, files: &mut [FileDiff]) {
+    /// Every blob change made by the non-merge side commits: path -> [(side index, old blob, new blob)].
+    fn side_touches(
+        &mut self,
+        side: &[crate::walk::SideCommit],
+    ) -> anyhow::Result<rustc_hash::FxHashMap<BString, Vec<Touch>>> {
+        let mut touched: rustc_hash::FxHashMap<BString, Vec<Touch>> = Default::default();
+        for (i, sc) in side.iter().enumerate() {
+            if sc.is_merge {
+                continue;
+            }
+            let Ok(new_tree) = self.repo.find_commit(sc.id).and_then(|c| c.tree()) else {
+                continue;
+            };
+            // A root commit (unrelated history) is diffed against the empty tree.
+            let old_tree = match sc.first_parent {
+                Some(parent) => match self.repo.find_commit(parent).and_then(|c| c.tree()) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                },
+                None => self.repo.empty_tree(),
+            };
+            let opts = TreeDiffOptions {
+                location: Some(Location::Path),
+                rewrites: None,
+            };
+            let mut found: Vec<(BString, Touch)> = Vec::new();
+            gix::diff::tree_with_rewrites(
+                TreeRefIter::from_bytes(&old_tree.data, old_tree.id.kind()),
+                TreeRefIter::from_bytes(&new_tree.data, new_tree.id.kind()),
+                &mut self.cache,
+                &mut self.state,
+                &self.repo.objects,
+                |change| {
+                    use gix::diff::tree_with_rewrites::ChangeRef as C;
+                    let t = match change {
+                        C::Addition { entry_mode, id, .. } if entry_mode.is_blob_or_symlink() => {
+                            Some((None, Some(id)))
+                        }
+                        C::Deletion { entry_mode, id, .. } if entry_mode.is_blob_or_symlink() => {
+                            Some((Some(id), None))
+                        }
+                        C::Modification {
+                            previous_entry_mode,
+                            previous_id,
+                            entry_mode,
+                            id,
+                            ..
+                        } if entry_mode.is_blob_or_symlink()
+                            && previous_entry_mode.is_blob_or_symlink() =>
+                        {
+                            Some((Some(previous_id), Some(id)))
+                        }
+                        _ => None,
+                    };
+                    if let Some((old, new)) = t {
+                        found.push((change.location().to_owned(), Touch { side: i, old, new }));
+                    }
+                    Ok(ControlFlow::Continue(()))
+                },
+                opts,
+            )
+            .map_err(|e| anyhow::anyhow!("tree diff of side commit {}: {e}", sc.id))?;
+            for (p, t) in found {
+                touched.entry(p).or_default().push(t);
+            }
+        }
+        self.cache.clear_resource_cache_keep_allocation();
+        Ok(touched)
+    }
+
+    /// In-process blame for the common case: the side commits that touched a file form one
+    /// unbroken chain of versions ending in `final_id`. Replays their diffs (whitespace-insensitive,
+    /// like `git blame -w`) from the chain's first version, whose lines stay "boundary".
+    /// Returns None when the history isn't such a chain (the caller falls back to git blame).
+    fn replay_chain(
+        &self,
+        touches: &[Touch],
+        final_id: ObjectId,
+    ) -> anyhow::Result<Option<Vec<Option<usize>>>> {
+        // Order by content continuity: each touch's old blob is the previous touch's new blob.
+        let produced: rustc_hash::FxHashSet<ObjectId> =
+            touches.iter().filter_map(|t| t.new).collect();
+        let starts: Vec<&Touch> = touches
+            .iter()
+            .filter(|t| t.old.is_none_or(|o| !produced.contains(&o)))
+            .collect();
+        if starts.len() != 1 {
+            return Ok(None);
+        }
+        let mut chain = vec![starts[0]];
+        while chain.len() < touches.len() {
+            let Some(cur) = chain.last().unwrap().new else {
+                return Ok(None);
+            };
+            let next: Vec<&Touch> = touches.iter().filter(|t| t.old == Some(cur)).collect();
+            if next.len() != 1 {
+                return Ok(None);
+            }
+            chain.push(next[0]);
+        }
+        if chain.last().unwrap().new != Some(final_id) {
+            return Ok(None);
+        }
+        // Replay: origin per line (None = older than the side branch).
+        let mut origins: Vec<Option<usize>> = match chain[0].old {
+            Some(id) => vec![None; count_lines(&self.blob(id)?) as usize],
+            None => Vec::new(),
+        };
+        for t in &chain {
+            let old = match t.old {
+                Some(id) => self.blob(id)?,
+                None => Vec::new(),
+            };
+            let new = self.blob(t.new.expect("chain links have a new blob"))?;
+            if is_binary(&old) || is_binary(&new) {
+                return Ok(None);
+            }
+            let (hunks, _, _) = ws_diff(&old, &new);
+            let mut out: Vec<Option<usize>> = Vec::with_capacity(count_lines(&new) as usize);
+            let mut pos = 0usize;
+            for h in &hunks {
+                out.extend_from_slice(origins.get(pos..h.b0 as usize).unwrap_or_default());
+                out.extend(std::iter::repeat_n(Some(t.side), (h.a1 - h.a0) as usize));
+                pos = h.b1 as usize;
+            }
+            out.extend_from_slice(origins.get(pos..).unwrap_or_default());
+            origins = out;
+        }
+        Ok(Some(origins))
+    }
+
+    /// Per-line origins -> runs.
+    fn to_runs(
+        origins: &[Option<usize>],
+        side: &[crate::walk::SideCommit],
+    ) -> Vec<crate::blame::BlameRun> {
+        let mut runs: Vec<crate::blame::BlameRun> = Vec::new();
+        for (line, o) in origins.iter().enumerate() {
+            match runs.last_mut() {
+                Some(r)
+                    if r.start + r.len == line as u32
+                        && r.origin.as_ref().map(|x| x.sha) == o.map(|i| side[i].id) =>
+                {
+                    r.len += 1
+                }
+                _ => runs.push(crate::blame::BlameRun {
+                    start: line as u32,
+                    len: 1,
+                    origin: o.map(|i| crate::blame::BlameOrigin {
+                        sha: side[i].id,
+                        name: side[i].author.name.clone(),
+                        email: side[i].author.email.clone(),
+                        time: side[i].author.time,
+                    }),
+                }),
+            }
+        }
+        runs
+    }
+
+    /// Origins for the merged file: replay the side chain to the side parent's version of the
+    /// file, then carry origins across the (side version -> merged version) diff. Lines the merge
+    /// itself introduced come back as None (credited to the merge).
+    fn replay_through_side(
+        &self,
+        touches: &[Touch],
+        merged_id: ObjectId,
+        path: &BString,
+        side_trees: &[ObjectId],
+    ) -> anyhow::Result<Option<Vec<Option<usize>>>> {
+        for tree_id in side_trees {
+            let Ok(tree) = self.repo.find_tree(*tree_id) else {
+                continue;
+            };
+            let Some(entry) = tree
+                .lookup_entry_by_path(path.to_os_str_lossy().as_ref() as &std::ffi::OsStr)
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
+            let side_id = entry.object_id();
+            let Some(origins) = self.replay_chain(touches, side_id)? else {
+                continue;
+            };
+            if side_id == merged_id {
+                return Ok(Some(origins));
+            }
+            let side_blob = self.blob(side_id)?;
+            let merged = self.blob(merged_id)?;
+            if is_binary(&side_blob) || is_binary(&merged) {
+                return Ok(None);
+            }
+            let (hunks, _, _) = ws_diff(&side_blob, &merged);
+            let mut out: Vec<Option<usize>> = Vec::with_capacity(count_lines(&merged) as usize);
+            let mut pos = 0usize;
+            for h in &hunks {
+                out.extend_from_slice(origins.get(pos..h.b0 as usize).unwrap_or_default());
+                out.extend(std::iter::repeat_n(None, (h.a1 - h.a0) as usize));
+                pos = h.b1 as usize;
+            }
+            out.extend_from_slice(origins.get(pos..).unwrap_or_default());
+            return Ok(Some(out));
+        }
+        Ok(None)
+    }
+
+    /// Credit the lines a merge adds (vs its first parent) to the side commits that wrote them:
+    /// replay the side branch's edits in-process when they form a simple chain, else `git blame`.
+    fn attribute_merge(
+        &mut self,
+        commit: &CommitInfo,
+        side: &[crate::walk::SideCommit],
+        files: &mut [FileDiff],
+    ) -> anyhow::Result<()> {
         let added: u64 = files
             .iter()
             .filter(|f| !f.binary && !f.submodule)
@@ -270,24 +503,50 @@ impl DiffWorker {
             .map(|h| u64::from(h.a1 - h.a0))
             .sum();
         if added == 0 || added > u64::from(self.opts.blame_max_lines) {
-            return;
+            return Ok(());
         }
-        let git_dir = self.repo.path();
+        let touched = self.side_touches(side)?;
+        let git_dir = self.repo.path().to_path_buf();
+        let side_trees: Vec<ObjectId> = commit.parents[1..]
+            .iter()
+            .filter_map(|p| Some(self.repo.find_commit(*p).ok()?.tree_id().ok()?.detach()))
+            .collect();
         for f in files.iter_mut() {
             if f.binary || f.submodule || f.approx || !f.hunks.iter().any(|h| h.a1 > h.a0) {
                 continue;
             }
-            match crate::blame::blame_added(
-                git_dir,
-                commit.id,
-                commit.parents[0],
-                &f.path,
-                &f.hunks,
-            ) {
-                Ok(runs) => f.blame = Some(runs),
-                Err(e) => tracing::debug!("merge blame fell back to the merger: {e:#}"),
+            let touches = if f.kind == crate::model::kind::RENAME {
+                None
+            } else {
+                touched.get(&f.path)
+            };
+            let replayed = match (touches, f.new_id) {
+                (Some(t), Some(merged_id)) => self
+                    .replay_through_side(t, merged_id, &f.path, &side_trees)?
+                    .map(|o| Self::to_runs(&o, side)),
+                _ => None,
+            };
+            match (replayed, touches) {
+                (Some(runs), _) => {
+                    crate::blame::BLAME_SHORTCUTS
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    f.blame = Some(runs);
+                }
+                // No side commit changed it: the merge itself wrote these lines.
+                (None, None) if f.kind != crate::model::kind::RENAME => {}
+                _ => match crate::blame::blame_added(
+                    &git_dir,
+                    commit.id,
+                    commit.parents[0],
+                    &f.path,
+                    &f.hunks,
+                ) {
+                    Ok(runs) => f.blame = Some(runs),
+                    Err(e) => tracing::debug!("merge blame fell back to the merger: {e:#}"),
+                },
             }
         }
+        Ok(())
     }
 
     fn file_diff(&self, change: Change) -> anyhow::Result<Option<FileDiff>> {
@@ -298,6 +557,12 @@ impl DiffWorker {
             } else {
                 None
             })
+        };
+        let new_id = match &change {
+            Change::Addition { id, .. }
+            | Change::Modification { id, .. }
+            | Change::Rewrite { id, .. } => Some(*id),
+            Change::Deletion { .. } => None,
         };
         let (path, old_path, kind, old, new, submodule) = match change {
             Change::Addition {
@@ -394,6 +659,7 @@ impl DiffWorker {
             old_path,
             kind,
             submodule,
+            new_id,
             ..Default::default()
         };
         let old_bytes = old.as_deref().unwrap_or_default();

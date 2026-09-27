@@ -20,6 +20,25 @@ pub struct BenchArgs {
     pub reps: usize,
     #[arg(long)]
     pub threads: Option<usize>,
+    /// Compare surviving lines per author with `git blame -w HEAD` on this many sampled files
+    #[arg(long, default_value_t = 0)]
+    pub verify: usize,
+}
+
+fn rss_anon_mb() -> f64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("RssAnon:"))
+                .map(str::to_string)
+        })
+        .and_then(|l| {
+            l.split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse::<f64>().ok())
+        })
+        .map_or(0.0, |kb| kb / 1024.0)
 }
 
 fn peak_rss_mb() -> f64 {
@@ -64,6 +83,18 @@ pub fn run(layout: Layout, args: BenchArgs) -> anyhow::Result<()> {
     if let Some(t) = args.threads {
         opts.threads = t;
     }
+    // Peak anonymous memory (VmHWM also counts the memory-mapped pack files, which are reclaimable).
+    let peak_anon = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let sampling = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    {
+        let (peak, on) = (peak_anon.clone(), sampling.clone());
+        std::thread::spawn(move || {
+            while on.load(std::sync::atomic::Ordering::Relaxed) {
+                peak.fetch_max(rss_anon_mb() as u64, std::sync::atomic::Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+    }
     let t0 = Instant::now();
     let mut rep = crate::progress::Reporter::new(false, false);
     let meta = extract_source(
@@ -86,7 +117,16 @@ pub fn run(layout: Layout, args: BenchArgs) -> anyhow::Result<()> {
         "extract         {extract_s:.2}s  ({:.0} steps/s)",
         meta.last_run["steps_new"].as_f64().unwrap_or(0.0) / extract_s.max(1e-9)
     );
-    println!("peak rss        {rss:.0} MB");
+    sampling.store(false, std::sync::atomic::Ordering::Relaxed);
+    println!("peak rss        {rss:.0} MB (incl. mapped pack files)");
+    println!(
+        "peak anon       {} MB",
+        peak_anon.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    println!(
+        "merge blame     {} files blamed, {} credited by single-commit shortcut",
+        meta.last_run["blame_calls"], meta.last_run["blame_shortcuts"]
+    );
     println!("cache size      {size:.1} MB");
 
     let db = Db::new(layout.clone())?;
@@ -226,5 +266,78 @@ pub fn run(layout: Layout, args: BenchArgs) -> anyhow::Result<()> {
         );
     }
     println!("peak rss (end)  {:.0} MB", peak_rss_mb());
+    if args.verify > 0 {
+        verify_blame(&db, &meta, args.verify)?;
+    }
+    Ok(())
+}
+
+/// Line-level agreement between strata's survival attribution and `git blame -w HEAD`.
+fn verify_blame(db: &Db, meta: &strata_store::RepoMeta, n: usize) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    // Per path, lines per author email (ours).
+    let ours: HashMap<String, HashMap<String, i64>> = db.with(&meta.id, |c, s| {
+        let mut stmt = c.prepare(&format!(
+            "SELECT p.path, lower(a.email), sum(o.delta)::BIGINT FROM {s}.origin_deltas o
+             JOIN {s}.paths p USING (path_id) JOIN {s}.authors a ON a.author_id = o.author_id
+             GROUP BY ALL HAVING sum(o.delta) > 0"
+        ))?;
+        let mut out: HashMap<String, HashMap<String, i64>> = HashMap::new();
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (p, e, v) = row?;
+            out.entry(p).or_default().insert(e, v);
+        }
+        Ok(out)
+    })?;
+    // Deterministic sample of files, spread across the sorted path list.
+    let mut paths: Vec<&String> = ours.keys().collect();
+    paths.sort();
+    let step = (paths.len() / n.max(1)).max(1);
+    let sample: Vec<&String> = paths.iter().step_by(step).take(n).copied().collect();
+    let (mut agree, mut total, mut files_exact) = (0i64, 0i64, 0usize);
+    for path in &sample {
+        let out = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(&meta.git_dir)
+            .args(["blame", "-w", "--line-porcelain", &meta.head, "--", path])
+            .output()?;
+        if !out.status.success() {
+            continue;
+        }
+        let mut theirs: HashMap<String, i64> = HashMap::new();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Some(mail) = line.strip_prefix("author-mail ") {
+                *theirs
+                    .entry(
+                        mail.trim_start_matches('<')
+                            .trim_end_matches('>')
+                            .to_lowercase(),
+                    )
+                    .or_insert(0) += 1;
+            }
+        }
+        let mine = &ours[*path];
+        let lines: i64 = theirs.values().sum();
+        let same: i64 = theirs
+            .iter()
+            .map(|(k, v)| (*v).min(*mine.get(k).unwrap_or(&0)))
+            .sum();
+        agree += same;
+        total += lines;
+        files_exact += usize::from(same == lines && mine.values().sum::<i64>() == lines);
+    }
+    println!(
+        "blame check     {} files: {:.2}% of lines credited to the same author as git blame -w; {} files exact",
+        sample.len(),
+        100.0 * agree as f64 / total.max(1) as f64,
+        files_exact
+    );
     Ok(())
 }
