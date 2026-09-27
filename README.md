@@ -44,7 +44,10 @@ Re-running is incremental: only commits since the last run are processed.
 | `strata bench SOURCE` | Time the extraction and every query endpoint. Reports peak memory, cache size, and merge-blame work. `--verify N` checks survival attribution against `git blame -w` on N sampled files. |
 
 The cache lives in `~/.cache/strata` (or `$STRATA_HOME`). URL sources are mirrored as bare clones
-under `clones/`.
+under `clones/`. Ctrl-C (or SIGTERM) during an extraction checkpoints and stops, and the next run
+continues from there. Other environment knobs: `STRATA_BLAME_JOBS` caps concurrent `git blame`
+fallbacks (default: half the CPUs), `STRATA_DUCKDB_MEMORY` caps the server's DuckDB (default 3GB),
+and `STRATA_LOG=debug` turns on verbose logs.
 
 ## How it works
 
@@ -57,9 +60,10 @@ under `clones/`.
   `git log --first-parent --numstat --diff-algorithm=histogram` exactly.
 - **Survival**: every live file keeps a run-length list recording which commit wrote each line.
   Diffs splice it, so survival is exact at O(changed lines) per step. Lines a merge brings in
-  are credited to the side-branch commits that wrote them. When that side branch's edits form a
-  simple chain, strata replays them in process; otherwise it runs `git blame` limited to the
-  side branch. On git/git this agrees with `git blame -w HEAD` for 99.1% of lines.
+  are credited to the side-branch commits that wrote them. strata replays the side branch's
+  edits in process, including merges inside it, memoizing line origins per file version. It runs
+  `git blame` limited to the side branch only when a version can't be reached. On git/git this
+  agrees with `git blame -w HEAD` for 99.1% of lines.
 - **Storage**: Parquet parts per repo, plus a resumable checkpoint. The server loads each repo
   into DuckDB and answers binned, filtered queries as Arrow IPC.
 - **Web app**: vanilla TypeScript, D3 and Canvas, drawing through a painter interface that also
