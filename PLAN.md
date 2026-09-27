@@ -521,3 +521,27 @@ to Forgejo as it lands.
   records side commits, so it would be additive.
 - A human vs AI-coauthored slice from `Co-Authored-By` trailers (declined for now, cheap to add
   later because the messages are stored).
+
+---
+
+## 12. Build status and deviations (2026-09-27)
+
+Everything in §1–§9 is implemented. The history is in the commits; the design changed in these
+places while building:
+
+| Plan | What was built | Why |
+|---|---|---|
+| Bars: a cumulative net-lines line on top | Dropped | A second measure on its own scale is a dual-axis chart. Cumulative size is the stacked area's job. |
+| Adds/dels green and red | Blue/red by default, classic green/red as a setting | Green/red measured ΔE 6.9–7.2 under deuteranopia (the colorblind warn band). Blue/red measured 21.6 light, 19.2 dark. |
+| Category chips in the filter row | One "Files" menu | Nine chips wrapped the row on real repos. |
+| Area top-N = 12 | Top 8 plus "(other)" | The validated categorical palette has 8 slots and hues are never cycled. |
+| Language colors from linguist | 8 fixed slots, ranked by current size | The linguist palette is a rainbow of 500+ hues. |
+| Merge attribution by ranged `git blame` | Side-branch replay in-process, `git blame --root P1..M` only as a fallback | 4× faster on git/git (101 s → 25.6 s). Agrees with `git blame -w HEAD` on 99.1% of lines. |
+| Tree node budget (breadth-first) | Loose-file grouping, a depth cap, then bottom-up collapse to the card's leaf capacity | A breadth-first budget produced solid fans and squeezed rings on real repos. |
+| Parquet written with arrow-rs | Written through an in-memory DuckDB (`COPY … TO`) | One dependency (DuckDB) instead of two (DuckDB plus parquet). |
+| Headless render via frame capture | The page renders frames and POSTs PNGs, piped into ffmpeg | No CDP dependency; works with Chrome and Firefox. |
+| Cohort unit per year | `auto`: month under 2 years of history, quarter under 6, year beyond | Young repos showed a single layer. |
+
+Measured (desktop, 12 threads): git/git, 24,344 first-parent steps, extracts in 25.6 s with
+~770 MB peak anonymous memory and a 10.8 MB cache. Every query stays under 50 ms at p95.
+Linux results are in the README.
