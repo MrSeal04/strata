@@ -238,6 +238,11 @@ export class TreeView extends View {
     this.parentIdx = Int32Array.from(parents);
     this.builtRev = tree.rev;
     this.builtAt = clock.now();
+    if (this.builtKey.split("|").pop() !== `${this.width}x${this.height}`) {
+        // Positions from another size or layout mean nothing now.
+        this.actors.clear();
+        this.beams = [];
+    }
     this.builtKey = this.key();
     this.layout();
   }
@@ -529,12 +534,12 @@ export class TreeView extends View {
         const ty = pts.length ? pts.reduce((acc, g) => acc + g.y, 0) / pts.length : this.height / 2;
         if (!a) {
           const name = this.app.authorName(aid);
-          a = { id: aid, name, x: tx + 30, y: ty - 30, tx, ty, last: now, img: null };
+          a = { id: aid, name, x: Math.max(16, Math.min(this.width - 150, tx + 30)), y: Math.max(16, Math.min(this.height - 16, ty - 30)), tx, ty, last: now, img: null };
           this.actors.set(aid, a);
           if (s.settings.gravatar) void this.loadGravatar(a);
         }
-        a.tx = tx + 14;
-        a.ty = ty - 14;
+        a.tx = Math.max(16, Math.min(this.width - 150, tx + 14));
+        a.ty = Math.max(16, Math.min(this.height - 16, ty - 14));
         a.last = now;
       }
     }

@@ -176,6 +176,7 @@ export async function runHeadlessRender(d: Dashboard, token: string) {
   try {
     const job = (await (await fetch(base)).json()) as { spec: RenderSpec; settings?: Record<string, unknown> };
     if (job.settings) d.app.store.setSettings(job.settings);
+    if (job.spec.target !== "dashboard") soloLayout(d, job.spec.target);
     // Let the charts fetch and the first layout settle.
     await d.app.sync.settle(d.app.store.get().cursor);
     await new Promise((r) => setTimeout(r, 1500));
@@ -187,5 +188,16 @@ export async function runHeadlessRender(d: Dashboard, token: string) {
     await post("/done");
   } catch (e) {
     await post("/error", e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** Give one view the whole dashboard area (single-view renders). */
+export function soloLayout(d: Dashboard, target: Exclude<Target, "dashboard">) {
+  d.grid.style.gridTemplateAreas = '"solo"';
+  d.grid.style.gridTemplateColumns = "1fr";
+  d.grid.style.gridTemplateRows = "1fr";
+  for (const [name, view] of Object.entries(d.views)) {
+    if (name === target) view.el.style.gridArea = "solo";
+    else view.el.style.display = "none";
   }
 }
