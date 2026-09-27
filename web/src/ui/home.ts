@@ -1,4 +1,4 @@
-import { ApiError, type JobStatus, api } from "../api/client";
+import { ApiError, type JobStatus, type RepoSource, api } from "../api/client";
 import { fmt, h } from "./dom";
 
 /** Repo picker: cached repos plus an "add path or URL" box. */
@@ -60,17 +60,46 @@ export function renderLoading(root: HTMLElement, jobId: string, repo: string): P
   const err = h("div", { class: "err" });
   const cancel = h("button", { class: "btn", text: "Cancel" });
   cancel.addEventListener("click", () => api.cancelJob(jobId).catch(() => {}));
-  root.replaceChildren(
-    h("main", { class: "loading-box" },
-      h("h1", { text: repo, style: "font-size:20px;margin:0 0 4px" }),
-      phase,
-      h("div", { class: "bar-track" }, fill),
-      detail,
-      err,
-      h("div", { style: "margin-top:16px;display:flex;gap:8px" }, cancel, h("a", { class: "btn", href: "#/", text: "All repositories" })),
-    ),
-  );
+  const track = h("div", { class: "bar-track" }, fill);
+  const actions = h("div", { style: "margin-top:16px;display:flex;gap:8px" }, cancel, h("a", { class: "btn", href: "#/", text: "All repositories" }));
+  const box = h("main", { class: "loading-box" }, h("h1", { text: repo, style: "font-size:20px;margin:0 0 4px" }), phase, track, detail, err, actions);
+  root.replaceChildren(box);
   return new Promise((resolve) => {
+    /** The remote wants a login: ask for it, then start the repo again with it. */
+    const askLogin = (j: JobStatus) => {
+      phase.textContent = `${j.host} needs a login`;
+      err.textContent = j.rejected ? "That login was rejected. Check the username and the password or token." : "";
+      track.remove();
+      detail.textContent = "";
+      cancel.remove();
+      const user = h("input", { type: "text", name: "username", autocomplete: "username", placeholder: "Username", "aria-label": "Username", required: true });
+      const pass = h("input", { type: "password", name: "password", autocomplete: "current-password", placeholder: "Password or access token", "aria-label": "Password or access token", required: true });
+      const send = h("button", { class: "btn primary", type: "submit", text: "Sign in and analyze" });
+      const remote = !isLocal(location.hostname) && location.protocol !== "https:";
+      const form = h("form", { class: "login" },
+        user,
+        pass,
+        remote && h("div", { class: "err", text: "This page is on another computer and uses plain HTTP, so the password would cross the network unencrypted." }),
+        h("div", { class: "muted", text: "strata keeps the login in memory until the server stops. It is never written to disk." }),
+        h("div", { class: "row" }, send, h("a", { class: "btn", href: "#/", text: "All repositories" })),
+      );
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        send.disabled = true;
+        err.textContent = "";
+        try {
+          const next = await api.addRepo(sourceText(j.source), false, { username: user.value.trim(), password: pass.value });
+          pass.value = "";
+          history.replaceState(null, "", `#/r/${encodeURIComponent(repo)}?job=${next.id}`);
+          resolve(await renderLoading(root, next.id, repo));
+        } catch (ex) {
+          err.textContent = ex instanceof Error ? ex.message : String(ex);
+          send.disabled = false;
+        }
+      });
+      actions.replaceWith(form);
+      user.focus();
+    };
     const es = api.jobEvents(jobId);
     const show = (j: JobStatus) => {
       const p = j.progress;
@@ -82,6 +111,9 @@ export function renderLoading(root: HTMLElement, jobId: string, repo: string): P
       if (j.state === "done") {
         es.close();
         resolve(true);
+      } else if (j.state === "credentials") {
+        es.close();
+        askLogin(j);
       } else if (j.state === "failed" || j.state === "cancelled") {
         es.close();
         err.textContent = j.state === "failed" ? `Extraction failed:\n${j.error ?? ""}` : "Cancelled.";
@@ -96,3 +128,7 @@ export function renderLoading(root: HTMLElement, jobId: string, repo: string): P
     };
   });
 }
+
+const isLocal = (host: string) => host === "localhost" || host === "::1" || host === "[::1]" || /^127\./.test(host);
+
+const sourceText = (s: RepoSource) => (s.kind === "path" ? s.path : s.url);

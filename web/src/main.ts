@@ -25,9 +25,11 @@ async function route() {
     const meta = await api.meta(repo).catch(() => null);
     if (!job && meta?.job?.state === "running") job = meta.job.id;
     if (!job && !meta) {
-      // Not extracted and no job id: maybe a job is running for it.
+      // Not extracted and no job id: show its latest job, which may already have stopped (a
+      // remote asking for a login fails before the browser opens).
       const { jobs } = await api.repos();
-      job = jobs.find((j) => j.repo === repo && j.state === "running")?.id;
+      const num = (id: string) => Number(id.replace(/\D/g, ""));
+      job = jobs.filter((j) => j.repo === repo && j.state !== "done").sort((a, b) => num(b.id) - num(a.id))[0]?.id;
     }
     if (job) {
       const ok = await renderLoading(root, job, repo);

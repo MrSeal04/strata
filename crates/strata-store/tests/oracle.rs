@@ -94,6 +94,7 @@ fn extract(layout: &Layout, repo: &Path) -> String {
         &src,
         &opts,
         false,
+        None,
         &AtomicBool::new(false),
         &mut |_| {},
     )

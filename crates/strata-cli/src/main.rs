@@ -1,6 +1,7 @@
 //! `strata`: see how a git repository grew over time.
 
 mod bench;
+mod login;
 mod progress;
 mod render;
 
@@ -14,7 +15,7 @@ use strata_engine::ExtractOptions;
 use strata_engine::diff::DiffOptions;
 use strata_server::ServerConfig;
 use strata_server::jobs::JobState;
-use strata_store::pipeline::extract_source;
+use strata_store::pipeline::{auth_required, extract_source};
 use strata_store::{Layout, Source};
 
 #[derive(Parser)]
@@ -176,6 +177,7 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
 fn handle_signals() {
     let _ = ctrlc::set_handler(|| {
         if CANCEL.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            login::restore_terminal();
             std::process::exit(130);
         }
         eprintln!("\nstopping after the current step (checkpointing)…");
@@ -189,14 +191,35 @@ fn cmd_extract(layout: &Layout, source: &str, args: &ExtractArgs) -> anyhow::Res
         args.progress == ProgressMode::Json,
         args.progress == ProgressMode::None,
     );
-    let meta = extract_source(
-        layout,
-        &source,
-        &args.options(),
-        !args.no_fetch,
-        &CANCEL,
-        &mut |p| reporter.update(p),
-    )?;
+    // A private HTTP remote gets up to three tries at a login typed in the terminal.
+    let mut login = None;
+    let mut tries = 0;
+    let meta = loop {
+        let result = extract_source(
+            layout,
+            &source,
+            &args.options(),
+            !args.no_fetch,
+            login.as_ref(),
+            &CANCEL,
+            &mut |p| reporter.update(p),
+        );
+        match result {
+            Ok(meta) => break meta,
+            Err(e) => match auth_required(&e) {
+                Some(auth)
+                    if tries < 3
+                        && login::interactive()
+                        && !CANCEL.load(std::sync::atomic::Ordering::SeqCst) =>
+                {
+                    reporter.finish();
+                    login = Some(login::ask(auth)?);
+                    tries += 1;
+                }
+                _ => return Err(e),
+            },
+        }
+    };
     reporter.finish();
     let run = &meta.last_run;
     if run["cancelled"] == true {
@@ -297,6 +320,7 @@ fn serve(
                 source,
                 extract.options(),
                 !extract.no_fetch,
+                None,
                 |_| {},
             );
             // Mirror job progress in the terminal.
@@ -318,6 +342,11 @@ fn serve(
                             break;
                         }
                         JobState::Cancelled => break,
+                        JobState::NeedsLogin { host, .. } => {
+                            reporter.finish();
+                            eprintln!("{host} wants a login: enter it in the browser");
+                            break;
+                        }
                     }
                 }
             });

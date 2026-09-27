@@ -102,6 +102,7 @@ pub fn run(layout: Layout, args: BenchArgs) -> anyhow::Result<()> {
         &source,
         &opts,
         false,
+        None,
         &AtomicBool::new(false),
         &mut |p| rep.update(p),
     )?;

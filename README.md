@@ -49,9 +49,11 @@ so `apt upgrade` picks up new releases; the release notes have the one-time setu
 | `strata bench SOURCE` | Time the extraction and every query endpoint. Reports peak memory, cache size, and merge-blame work. `--verify N` checks survival attribution against `git blame -w` on N sampled files. |
 
 The cache lives in `~/.cache/strata` (or `$STRATA_HOME`). URL sources are mirrored as bare clones
-under `clones/`. strata never prompts for credentials: for a private repository, use an SSH URL
-with a key the server accepts, or store the credentials in a git credential helper. Ctrl-C (or
-SIGTERM) during an extraction checkpoints and stops, and the next run continues from there.
+under `clones/`. A private HTTP(S) repository asks for a login: the dashboard shows a form, and
+`strata extract` prompts in the terminal. strata keeps the login in memory until it exits and hands
+it to git through a one-off credential helper, so it never reaches the URL, the command line or the
+cache. SSH URLs use your keys and ssh-agent as usual. Ctrl-C (or SIGTERM) during an extraction
+checkpoints and stops, and the next run continues from there.
 Other environment knobs: `STRATA_BLAME_JOBS` caps concurrent `git blame` fallbacks (default: half
 the CPUs), `STRATA_DUCKDB_MEMORY` caps the server's DuckDB (default 3GB), and `STRATA_LOG=debug`
 turns on verbose logs.

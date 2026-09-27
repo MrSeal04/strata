@@ -22,3 +22,4 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 open = "5"
 ctrlc = { version = "3.5.2", features = ["termination"] }
+libc = "0.2"

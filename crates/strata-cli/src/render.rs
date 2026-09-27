@@ -166,6 +166,7 @@ pub fn run(layout: Layout, args: RenderArgs) -> anyhow::Result<()> {
                     &source,
                     &ExtractOptions::default(),
                     true,
+                    None,
                     &AtomicBool::new(false),
                     &mut |p| rep.update(p),
                 )?;

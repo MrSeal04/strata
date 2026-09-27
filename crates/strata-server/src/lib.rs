@@ -21,6 +21,7 @@ use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use strata_engine::ExtractOptions;
+use strata_store::pipeline::Credentials;
 use strata_store::{AreaMode, AreaQuery, Axis, Bins, Db, Filters, Layout, Slice, Source};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -137,13 +138,25 @@ struct AddRepo {
     source: String,
     #[serde(default)]
     full: bool,
+    /// A login for a private HTTP(S) remote, kept in memory only.
+    username: Option<String>,
+    password: Option<String>,
 }
 
 async fn add_repo(State(st): State<Shared>, Json(body): Json<AddRepo>) -> ApiResult<Json<Value>> {
     let source = Source::parse(body.source.trim())?;
     let mut opts = st.extract_opts.clone();
     opts.full = body.full;
-    let job = st.jobs.start(st.layout.clone(), source, opts, true, |_| {});
+    let login = match (body.username.as_deref(), body.password.as_deref()) {
+        (None, None) => None,
+        (u, p) => Some(Credentials::new(
+            u.unwrap_or_default().trim(),
+            p.unwrap_or_default(),
+        )?),
+    };
+    let job = st
+        .jobs
+        .start(st.layout.clone(), source, opts, true, login, |_| {});
     let status = job.status.lock().unwrap().clone();
     Ok(Json(serde_json::to_value(status)?))
 }
@@ -192,6 +205,10 @@ async fn job_events(
 }
 
 async fn repo_meta(State(st): State<Shared>, Path(repo): Path<String>) -> ApiResult<Json<Value>> {
+    // A repo whose first extraction hasn't finished has a directory but no meta.json yet.
+    if !st.layout.repo_dir(&repo).join("meta.json").exists() {
+        return Err(anyhow::anyhow!("repo '{repo}' has not been extracted yet").into());
+    }
     let meta = st.layout.read_meta(&repo)?;
     let s = st.clone();
     let r = repo.clone();

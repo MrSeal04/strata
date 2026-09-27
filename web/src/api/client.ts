@@ -1,10 +1,12 @@
 import { type Table, tableFromIPC } from "apache-arrow";
 import type { State } from "../state/store";
 
+export type RepoSource = { kind: "path"; path: string } | { kind: "url"; url: string };
+
 export interface RepoMeta {
   id: string;
   name: string;
-  source: { kind: "path"; path: string } | { kind: "url"; url: string };
+  source: RepoSource;
   branch: string;
   head: string;
   steps: number;
@@ -26,9 +28,19 @@ export interface JobProgress {
 export interface JobStatus {
   id: string;
   repo: string;
-  state: "running" | "done" | "failed" | "cancelled";
+  source: RepoSource;
+  /** "credentials": the remote wants a login (`rejected`: it refused the one sent). */
+  state: "running" | "done" | "failed" | "cancelled" | "credentials";
   error?: string;
+  host?: string;
+  rejected?: boolean;
   progress: JobProgress;
+}
+
+/** A login for a private HTTP(S) remote; the server keeps it in memory only. */
+export interface Login {
+  username: string;
+  password: string;
 }
 
 export interface Summary {
@@ -114,11 +126,11 @@ const base = (repo: string) => `/api/r/${encodeURIComponent(repo)}`;
 
 export const api = {
   repos: () => json<{ repos: RepoMeta[]; jobs: JobStatus[] }>("/api/repos"),
-  addRepo: (source: string, full = false) =>
+  addRepo: (source: string, full = false, login?: Login) =>
     json<JobStatus>("/api/repos", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ source, full }),
+      body: JSON.stringify({ source, full, ...login }),
     }),
   job: (id: string) => json<JobStatus>(`/api/jobs/${id}`),
   cancelJob: (id: string) => json<unknown>(`/api/jobs/${id}/cancel`, { method: "POST" }),

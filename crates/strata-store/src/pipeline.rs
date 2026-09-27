@@ -26,19 +26,112 @@ pub struct JobProgress {
     pub message: Option<String>,
 }
 
+/// A login for an HTTP(S) remote, kept in memory only. git receives it from a one-off
+/// credential helper that reads two environment variables, so it never reaches argv (which
+/// other local users can read), the URL, the clone's config or the cache.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Credentials {
+    pub username: String,
+    pub password: String,
+}
+
+impl Credentials {
+    /// Checks the login fits git's credential protocol, which carries one line per value.
+    pub fn new(username: &str, password: &str) -> anyhow::Result<Self> {
+        if username.is_empty() || password.is_empty() {
+            bail!("enter both a username and a password or access token");
+        }
+        if [username, password]
+            .iter()
+            .any(|v| v.contains(['\n', '\r', '\0']))
+        {
+            bail!("the username and password cannot contain line breaks");
+        }
+        Ok(Self {
+            username: username.to_string(),
+            password: password.to_string(),
+        })
+    }
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("username", &self.username)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The remote wants a login that strata doesn't have, or refused the one it sent.
+#[derive(Debug)]
+pub struct AuthRequired {
+    /// `scheme://host[:port]` of the remote, for the prompt.
+    pub host: String,
+    /// A login was sent and the server refused it.
+    pub rejected: bool,
+}
+
+impl std::fmt::Display for AuthRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.rejected {
+            write!(f, "{} rejected the login", self.host)
+        } else {
+            write!(
+                f,
+                "{} wants a login: enter it in the dashboard or run strata in a terminal, \
+                 or use an SSH URL",
+                self.host
+            )
+        }
+    }
+}
+
+impl std::error::Error for AuthRequired {}
+
+/// The `AuthRequired` anywhere in an error's chain.
+pub fn auth_required(e: &anyhow::Error) -> Option<&AuthRequired> {
+    e.chain().find_map(|c| c.downcast_ref::<AuthRequired>())
+}
+
+/// `scheme://host[:port]` of a remote URL, without any user info.
+fn remote_host(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if scheme.is_empty() {
+        host.to_string()
+    } else {
+        format!("{scheme}://{host}")
+    }
+}
+
+/// Answers git's `get` with the login in `STRATA_GIT_USERNAME` / `STRATA_GIT_PASSWORD`.
+const CREDENTIAL_HELPER: &str = "credential.helper=!f() { test \"$1\" = get && \
+     printf 'username=%s\\npassword=%s\\n' \"$STRATA_GIT_USERNAME\" \"$STRATA_GIT_PASSWORD\"; }; f";
+
 /// Run a git command, forwarding its progress lines ("Receiving objects:  42% ...") to `progress`.
 ///
 /// git runs in its own session, with no controlling terminal and terminal prompts off, so a
 /// server that asks for credentials (or ssh asking about a host key) fails at once instead of
-/// waiting on a prompt nobody sees. Setting `cancel` stops the whole process group (git,
-/// git-remote-http, ssh): SIGTERM first so git removes its lock files, SIGKILL if that hangs.
+/// waiting on a prompt nobody sees; that failure comes back as `AuthRequired` for `url`, so the
+/// caller can ask for a login and retry with `login`. Setting `cancel` stops the whole process
+/// group (git, git-remote-http, ssh): SIGTERM first so git removes its lock files, SIGKILL if
+/// that hangs.
 fn git_with_progress(
     args: &[&str],
     cwd: Option<&Path>,
+    url: &str,
+    login: Option<&Credentials>,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(&JobProgress),
 ) -> anyhow::Result<()> {
     let mut cmd = Command::new("git");
+    if let Some(c) = login {
+        // The empty helper clears any configured ones, so git uses this login and stores it nowhere.
+        cmd.args(["-c", "credential.helper=", "-c", CREDENTIAL_HELPER])
+            .env("STRATA_GIT_USERNAME", &c.username)
+            .env("STRATA_GIT_PASSWORD", &c.password);
+    }
     cmd.args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
@@ -83,16 +176,19 @@ fn git_with_progress(
     }
     read?;
     if !status.success() {
-        let mut msg = format!("git {} failed:\n{}", args.join(" "), tail.join("\n"));
-        if tail.iter().any(|l| {
-            l.contains("terminal prompts disabled") || l.contains("could not read Username")
-        }) {
-            msg.push_str(
-                "\nThe server wants credentials, and strata cannot prompt for them. Use an SSH URL \
-                 with a key the server accepts, or store the credentials in a git credential helper.",
-            );
+        let wants_login = tail.iter().any(|l| {
+            l.contains("could not read Username")
+                || l.contains("could not read Password")
+                || l.contains("Authentication failed for")
+        });
+        if wants_login {
+            return Err(AuthRequired {
+                host: remote_host(url),
+                rejected: login.is_some(),
+            }
+            .into());
         }
-        bail!(msg);
+        bail!("git {} failed:\n{}", args.join(" "), tail.join("\n"));
     }
     Ok(())
 }
@@ -180,6 +276,7 @@ pub fn prepare_git_dir(
     layout: &Layout,
     source: &Source,
     fetch: bool,
+    login: Option<&Credentials>,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(&JobProgress),
 ) -> anyhow::Result<PathBuf> {
@@ -199,6 +296,8 @@ pub fn prepare_git_dir(
                             "+refs/heads/*:refs/heads/*",
                         ],
                         Some(&dir),
+                        url,
+                        login,
                         cancel,
                         progress,
                     )?;
@@ -210,6 +309,8 @@ pub fn prepare_git_dir(
                 if let Err(e) = git_with_progress(
                     &["clone", "--bare", "--progress", url, &tmp.to_string_lossy()],
                     None,
+                    url,
+                    login,
                     cancel,
                     progress,
                 ) {
@@ -223,12 +324,14 @@ pub fn prepare_git_dir(
     }
 }
 
-/// Extract `source` into the cache and return its fresh metadata.
+/// Extract `source` into the cache and return its fresh metadata. `login` is for private HTTP(S)
+/// remotes; without it they fail with `AuthRequired`.
 pub fn extract_source(
     layout: &Layout,
     source: &Source,
     opts: &ExtractOptions,
     fetch: bool,
+    login: Option<&Credentials>,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(&JobProgress),
 ) -> anyhow::Result<RepoMeta> {
@@ -244,7 +347,7 @@ pub fn extract_source(
         }
         Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
     }
-    let git_dir = prepare_git_dir(layout, source, fetch, cancel, progress)?;
+    let git_dir = prepare_git_dir(layout, source, fetch, login, cancel, progress)?;
     let repo_cfg = git_dir.join(".strata.toml");
     let cache_cfg = dir.join("strata.toml");
     let cfg = RepoConfig::load(&[&repo_cfg, &cache_cfg])?;
@@ -303,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn credential_prompt_fails_instead_of_waiting() {
+    fn login_prompt_fails_fast_as_auth_required() {
         let url = needs_auth_server();
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("clone");
@@ -319,6 +422,8 @@ mod tests {
                 &dest.to_string_lossy(),
             ],
             None,
+            &url,
+            None,
             &AtomicBool::new(false),
             &mut |_| {},
         )
@@ -328,9 +433,34 @@ mod tests {
             "took {:?}",
             t0.elapsed()
         );
+        let auth = auth_required(&err).unwrap_or_else(|| panic!("not AuthRequired: {err:#}"));
+        assert_eq!(auth.host, remote_host(&url));
+        assert!(!auth.rejected);
+    }
+
+    #[test]
+    fn remote_host_drops_path_and_user_info() {
+        assert_eq!(
+            remote_host("http://git.example.com:3000/you/other.git"),
+            "http://git.example.com:3000"
+        );
+        assert_eq!(
+            remote_host("https://bob:pw@github.com/org/repo"),
+            "https://github.com"
+        );
+        assert_eq!(remote_host("host.example"), "host.example");
+    }
+
+    #[test]
+    fn credentials_are_validated_and_never_debug_printed() {
+        assert!(Credentials::new("", "pw").is_err());
+        assert!(Credentials::new("bob", "").is_err());
+        assert!(Credentials::new("bob", "pw\nusername=eve").is_err());
+        let c = Credentials::new("bob", "hunter2-secret").unwrap();
+        let shown = format!("{c:?}");
         assert!(
-            format!("{err:#}").contains("strata cannot prompt"),
-            "{err:#}"
+            shown.contains("bob") && !shown.contains("hunter2"),
+            "{shown}"
         );
     }
 
@@ -370,6 +500,8 @@ mod tests {
                     &url,
                     &dest.to_string_lossy(),
                 ],
+                None,
+                &url,
                 None,
                 &cancel,
                 &mut |_| {},
