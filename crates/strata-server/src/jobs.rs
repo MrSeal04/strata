@@ -113,6 +113,7 @@ impl Jobs {
                     JobState::Cancelled
                 }
                 Ok(meta) => JobState::Done { repo: meta.id },
+                Err(_) if j.cancel.load(Ordering::Relaxed) => JobState::Cancelled,
                 Err(e) => JobState::Failed {
                     error: format!("{e:#}"),
                 },
