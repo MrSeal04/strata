@@ -2,7 +2,6 @@ import type { Dashboard } from "../ui/dashboard";
 import { h } from "../ui/dom";
 import { popover } from "../ui/popover";
 import { type Target, exportPng, exportSvg } from "./snapshot";
-import { openVideoDialog } from "./video";
 
 export function openExportMenu(d: Dashboard, anchor: HTMLElement) {
   const target = h("select", {},
@@ -18,7 +17,8 @@ export function openExportMenu(d: Dashboard, anchor: HTMLElement) {
   const svg = h("button", { class: "btn", text: "SVG snapshot" });
   svg.addEventListener("click", () => exportSvg(d, t()));
   const video = h("button", { class: "btn", text: "Video (MP4 / GIF)…" });
-  video.addEventListener("click", () => openVideoDialog(d, anchor, t()));
+  // Encoders load only when someone records a video.
+  video.addEventListener("click", () => void import("./video").then((m) => m.openVideoDialog(d, anchor, t())));
   popover(anchor, h("div", {},
     h("h3", { text: "Export" }),
     h("label", { class: "row" }, h("span", { text: "What" }), target),
