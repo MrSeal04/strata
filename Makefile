@@ -20,7 +20,7 @@ build: web
 
 # Self-contained binary: DuckDB compiled from source and linked statically (slow).
 bundled: web
-	DUCKDB_DOWNLOAD_LIB=0 $(CARGO) build --release --features strata-store/bundled
+	DUCKDB_DOWNLOAD_LIB=0 CARGO_BUILD_JOBS=$${CARGO_BUILD_JOBS:-3} $(CARGO) build --release -p strata-cli --features strata-store/bundled
 
 check: web/node_modules
 	$(CARGO) fmt --check
