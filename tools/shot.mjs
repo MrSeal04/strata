@@ -16,7 +16,8 @@ const scale = scaleIdx >= 0 ? Number(rest[scaleIdx + 1]) : 1;
 const browser = await puppeteer.launch({
   executablePath: process.env.CHROME ?? "/usr/bin/google-chrome",
   headless: true,
-  args: ["--no-sandbox", "--disable-gpu", "--hide-scrollbars"],
+  // --gpu: real GPU rasterization (Canvas/WebGL timings like a desktop browser); default software.
+  args: ["--no-sandbox", "--hide-scrollbars", ...(rest.includes("--gpu") ? ["--enable-gpu", "--ignore-gpu-blocklist", "--use-gl=angle", "--use-angle=gl-egl"] : ["--disable-gpu"])],
 });
 const page = await browser.newPage();
 await page.setViewport({ width: Number(w), height: Number(h), deviceScaleFactor: scale });

@@ -49,6 +49,8 @@ export class TNode {
   value = 0;
   files = 0;
   file: FileRec | null = null;
+  /** The treemap's eased on-screen rect for this node (view state, kept here for speed). */
+  shown: { x0: number; y0: number; x1: number; y1: number } | null = null;
   constructor(
     readonly id: string,
     readonly name: string,

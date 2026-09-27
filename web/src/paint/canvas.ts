@@ -1,5 +1,29 @@
 import { FONT, MONO, type Painter, type TextStyle } from "./painter";
 
+/** Truncated labels, cached by (font, text, width): a large treemap fits the same labels every frame. */
+const fitCache = new Map<string, string>();
+
+function fitText(c: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, s: string, maxWidth: number, font: string): string {
+  const key = `${font}|${Math.floor(maxWidth)}|${s}`;
+  const hit = fitCache.get(key);
+  if (hit !== undefined) return hit;
+  let out = s;
+  if (c.measureText(s).width > maxWidth) {
+    // binary search on the prefix length
+    let lo = 0;
+    let hi = s.length;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (c.measureText(`${s.slice(0, mid)}…`).width <= maxWidth) lo = mid;
+      else hi = mid - 1;
+    }
+    out = `${s.slice(0, Math.max(1, lo))}…`;
+  }
+  if (fitCache.size > 20_000) fitCache.clear();
+  fitCache.set(key, out);
+  return out;
+}
+
 export class CanvasPainter implements Painter {
   readonly ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
@@ -29,6 +53,15 @@ export class CanvasPainter implements Painter {
     this.ctx.fillStyle = fill;
     this.ctx.fillRect(x, y, w, h);
     this.ctx.globalAlpha = 1;
+  }
+
+  rects(xywh: ArrayLike<number>, fill: string, alpha = 1) {
+    // One fillStyle, many fillRect calls: much cheaper to rasterize than one huge path.
+    const c = this.ctx;
+    c.globalAlpha = alpha;
+    c.fillStyle = fill;
+    for (let i = 0; i + 3 < xywh.length; i += 4) c.fillRect(xywh[i], xywh[i + 1], xywh[i + 2], xywh[i + 3]);
+    c.globalAlpha = 1;
   }
 
   roundRect(x: number, y: number, w: number, h: number, r: [number, number, number, number], fill: string, alpha = 1) {
@@ -150,10 +183,9 @@ export class CanvasPainter implements Painter {
     c.textAlign = st.align ?? "left";
     c.textBaseline = st.baseline ?? "alphabetic";
     let str = s;
-    if (st.maxWidth !== undefined && c.measureText(str).width > st.maxWidth) {
-      if (st.maxWidth < 12) return;
-      while (str.length > 1 && c.measureText(`${str}…`).width > st.maxWidth) str = str.slice(0, -1);
-      str = `${str}…`;
+    if (st.maxWidth !== undefined) {
+      if (st.maxWidth < 12 && c.measureText(str).width > st.maxWidth) return;
+      str = fitText(c, s, st.maxWidth, c.font);
     }
     c.fillText(str, x, y);
   }

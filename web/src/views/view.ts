@@ -78,6 +78,9 @@ export abstract class View {
     });
   }
 
+  /** True while painting the on-screen canvas (false for exports). */
+  protected onScreen = false;
+
   drawNow() {
     // During video export frames are painted by the exporter (with virtual time); the screen waits.
     if (this.width <= 1 || this.height <= 1 || clock.exporting) return;
@@ -85,9 +88,20 @@ export abstract class View {
     const ctx = this.canvas.getContext("2d");
     if (!ctx) return;
     const p = new CanvasPainter(ctx, this.width, this.height, dpr);
-    p.clear(palette().surface);
-    this.draw(p);
+    if (this.transparentBackground()) ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    else p.clear(palette().surface);
+    this.onScreen = true;
+    try {
+      this.draw(p);
+    } finally {
+      this.onScreen = false;
+    }
     if (this.animating()) this.invalidate();
+  }
+
+  /** A view that paints part of itself on a layer underneath keeps its 2D canvas transparent. */
+  protected transparentBackground(): boolean {
+    return false;
   }
 
   /** Render into an arbitrary painter (export). */

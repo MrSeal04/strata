@@ -3,6 +3,7 @@ import type { App } from "../app";
 import { clock } from "../clock";
 import { colorMaps, diverging, inkOn, mix, sequential } from "../model/colors";
 import { type FileTree, type TNode, stableChildren } from "../model/filetree";
+import { GlRects } from "../paint/glrects";
 import type { Painter } from "../paint/painter";
 import type { ColorBy } from "../state/store";
 import { palette } from "../theme";
@@ -21,6 +22,29 @@ interface Rect {
 type LNode = HierarchyRectangularNode<TNode>;
 
 /** Shared per-file coloring for the treemap and the tree. */
+/** Language color per path id, rebuilt when the palette changes (a 100k-file frame asks a lot). */
+let langCache: { pal: unknown; colors: string[] } = { pal: null, colors: [] };
+
+function langColor(app: App, pathId: number): string {
+  const pal = palette();
+  if (langCache.pal !== pal || langCache.colors.length !== app.paths.lang.length) {
+    const byLang = new Map<string, string>();
+    langCache = {
+      pal,
+      colors: app.paths.lang.map((l) => {
+        const key = l || "Other";
+        let c = byLang.get(key);
+        if (c === undefined) {
+          c = colorMaps.lang.color(key);
+          byLang.set(key, c);
+        }
+        return c;
+      }),
+    };
+  }
+  return langCache.colors[pathId] ?? pal.other;
+}
+
 export function fileColor(app: App, node: TNode, mode: ColorBy, now: number): string {
   const pal = palette();
   const f = node.file;
@@ -28,7 +52,7 @@ export function fileColor(app: App, node: TNode, mode: ColorBy, now: number): st
   if (app.store.get().compare && app.compare.data) return growthColor(app, f.pathId);
   switch (mode) {
     case "lang":
-      return colorMaps.lang.color(app.paths.lang[f.pathId] || "Other");
+      return langColor(app, f.pathId);
     case "author":
       return f.topAuthor < 0 ? pal.other : colorMaps.author.color(app.authorName(f.topAuthor));
     case "age": {
@@ -57,12 +81,16 @@ export function growthColor(app: App, pathId: number): string {
 }
 
 /** 1 when a file was just touched, decaying to 0 over `heatSeconds` of playback. */
+let heatSteps = { key: -1, steps: 1 };
+
 export function heat(app: App, touched: number, pos: number): number {
   if (touched < 0) return 0;
   const age = pos - touched;
   if (age < -0.5) return 0;
-  const steps = Math.max(0.5, app.store.get().settings.heatSeconds * app.stepsPerSecond());
-  return Math.exp(-Math.max(0, age) / steps);
+  // The decay length is the same for every file in a frame; compute it once per ~frame.
+  const key = Math.floor(clock.now() / 8);
+  if (heatSteps.key !== key) heatSteps = { key, steps: Math.max(0.5, app.store.get().settings.heatSeconds * app.stepsPerSecond()) };
+  return Math.exp(-Math.max(0, age) / heatSteps.steps);
 }
 
 interface Pane {
@@ -77,16 +105,28 @@ interface Pane {
 
 export class TreemapView extends View {
   private panes: Pane[] = [];
-  private shown = new Map<string, Rect>();
+  /** Last rects of files that were just renamed away (so the new path can glide from there). */
+  private renameRects = new Map<string, Rect>();
+  /** Folders drawn as a single rect (too small to show their files): folder -> its largest file. */
+  private lod = new WeakMap<TNode, TNode>();
   private layoutKey = "";
   private layoutAt = 0;
   private hover: { pane: Pane; node: LNode } | null = null;
   private moving = false;
   private lastFrame = 0;
   private modeSel: HTMLSelectElement;
+  /** WebGL layer for the rect fills of large treemaps (null without WebGL2). */
+  private gl: GlRects | null = null;
+  private glActive = false;
 
   constructor(private app: App) {
     super("treemap", "Files by size");
+    this.gl = GlRects.create();
+    if (this.gl) {
+      this.gl.canvas.style.display = "none";
+      this.gl.canvas.setAttribute("aria-hidden", "true");
+      this.body.insertBefore(this.gl.canvas, this.canvas);
+    }
     this.modeSel = h("select", { "aria-label": "Compare layout" }, h("option", { value: "overlay", text: "B, colored by change" }), h("option", { value: "side", text: "A and B side by side" }));
     this.modeSel.addEventListener("change", () => {
       const c = app.store.get().compare;
@@ -136,7 +176,18 @@ export class TreemapView extends View {
 
   private relayout() {
     const s = this.app.store.get();
+    const renamedFrom = new Set(this.app.tree.renames.values());
+    this.renameRects.clear();
+    if (renamedFrom.size) {
+      for (const pane of this.panes) {
+        for (const n of pane.nodes) {
+          const r = renamedFrom.has(n.data.id) ? n.data.shown : null;
+          if (r) this.renameRects.set(n.data.id, r);
+        }
+      }
+    }
     const top = (spec: Omit<Pane, "root" | "nodes">) => (spec.label ? 16 : 0);
+    this.lod = new WeakMap();
     this.panes = this.paneSpecs().map((spec) => {
       const display = spec.tree.find(s.root) ?? spec.tree.root;
       const root = hierarchy<TNode>(display, (n) => (n.children ? stableChildren(n) : null)).sum((n) => (n.file && !n.file.binary ? n.file.lines : 0));
@@ -156,8 +207,21 @@ export class TreemapView extends View {
         n.y0 += top(spec);
         n.y1 += top(spec);
       });
-      // Sub-pixel files still paint (antialiased), so dense folders blend into their files' colors.
-      const nodes = r.descendants().filter((n) => (n.x1 - n.x0) * (n.y1 - n.y0) >= 0.02 && (n.value ?? 0) > 0);
+      // Level of detail: a folder smaller than ~30 px² is drawn as one rect in the color of its
+      // largest file instead of hundreds of sub-pixel slivers (at Linux scale most files are).
+      const nodes: LNode[] = [];
+      const visit = (n: LNode) => {
+        if (area(n) < 0.02 || !(n.value ?? 0)) return;
+        nodes.push(n);
+        if (n.children && n.depth > 0 && area(n) < 30) {
+          let best: LNode | null = null;
+          for (const l of n.leaves()) if (l.data.file && (!best || (l.value ?? 0) > (best.value ?? 0))) best = l;
+          if (best) this.lod.set(n.data, best.data);
+          return;
+        }
+        n.children?.forEach((c) => visit(c as LNode));
+      };
+      visit(r);
       return { ...spec, root: r, nodes };
     });
     this.layoutKey = this.currentKey();
@@ -174,12 +238,23 @@ export class TreemapView extends View {
     return this.moving;
   }
 
+  /** Large treemaps fill their cells on the WebGL layer underneath. */
+  private wantsGl(): boolean {
+    return !!this.gl && this.panes.reduce((a, q) => a + q.nodes.length, 0) > 4000;
+  }
+
+  protected transparentBackground(): boolean {
+    return this.wantsGl();
+  }
+
   draw(p: Painter) {
     const pal = palette();
     const s = this.app.store.get();
     const now = clock.now();
     const nodeCount = this.panes.reduce((a, q) => a + q.nodes.length, 0);
-    const throttle = s.playing ? (nodeCount > 20_000 ? 250 : 60) : 0;
+    // Relayout is O(files); at Linux scale do it a little over once a second while playing and
+    // let the easing carry the motion in between.
+    const throttle = s.playing ? (nodeCount > 50_000 ? 800 : nodeCount > 20_000 ? 250 : 60) : 0;
     const key = this.currentKey();
     const sizeChanged = !this.layoutKey.startsWith(`${this.width}x${this.height}|`);
     if (key !== this.layoutKey) {
@@ -199,26 +274,28 @@ export class TreemapView extends View {
     const colorBy = s.settings.colorBy;
     const searchPaths = s.search?.kind === "path" && s.search.paths.size ? s.search.paths : null;
     const comparing = !!(s.compare && this.app.compare.data);
-    const seen = new Set<string>();
+    // Collect first, then paint in batches: one fill per color instead of 100k fillStyle changes.
+    const dirs: number[] = [];
+    const groups = new Map<string, { fill: string; alpha: number; xywh: number[] }>();
+    const rings: [number, number, number, number, string, number][] = [];
+    const labels: [string, number, number, number, string, boolean][] = [];
     for (const pane of this.panes) {
-      if (pane.label) p.text(pane.label, pane.x + 4, 11, { color: pal.ink2, size: 11, weight: 600, maxWidth: pane.w - 8 });
+      if (pane.label) labels.push([pane.label, pane.x + 4, 11, pane.w - 8, pal.ink2, true]);
       for (const n of pane.nodes) {
-        const id = `${pane.key}:${n.data.id}`;
-        seen.add(id);
-        let r = this.shown.get(id);
+        let r = n.data.shown;
         if (!r) {
           // A renamed file glides from where it used to be.
           const from = pane.key === "L" ? pane.tree.renames.get(n.data.id) : undefined;
-          const prev = from ? this.shown.get(`${pane.key}:${from}`) : undefined;
+          const prev = from ? this.renameRects.get(from) : undefined;
           r = prev ? { ...prev } : { x0: n.x0, y0: n.y0, x1: n.x1, y1: n.y1 };
-          this.shown.set(id, r);
+          n.data.shown = r;
         }
         if (k < 1) {
           r.x0 += (n.x0 - r.x0) * k;
           r.y0 += (n.y0 - r.y0) * k;
           r.x1 += (n.x1 - r.x1) * k;
           r.y1 += (n.y1 - r.y1) * k;
-          if (Math.abs(r.x0 - n.x0) + Math.abs(r.y0 - n.y0) + Math.abs(r.x1 - n.x1) + Math.abs(r.y1 - n.y1) > 0.6) moving = true;
+          if (!moving && Math.abs(r.x0 - n.x0) + Math.abs(r.y0 - n.y0) + Math.abs(r.x1 - n.x1) + Math.abs(r.y1 - n.y1) > 0.6) moving = true;
         } else {
           r.x0 = n.x0;
           r.y0 = n.y0;
@@ -227,35 +304,54 @@ export class TreemapView extends View {
         }
         const w = r.x1 - r.x0;
         const hh = r.y1 - r.y0;
-        if (n.data.isDir) {
+        const rep = n.data.isDir ? this.lod.get(n.data) : undefined;
+        if (n.data.isDir && !rep) {
           if (n.depth === 0) continue;
-          p.rect(r.x0, r.y0, w, hh, pal.dir);
+          dirs.push(r.x0, r.y0, w, hh);
           const child = n.children?.[0];
-          if (child && child.y0 - n.y0 >= 14.5 && w > 60) {
-            p.text(n.data.name, r.x0 + 4, r.y0 + 7.5, { color: pal.ink2, size: 10, weight: 600, baseline: "middle", maxWidth: w - 8 });
-          }
+          if (child && child.y0 - n.y0 >= 14.5 && w > 60) labels.push([n.data.name, r.x0 + 4, r.y0 + 7.5, w - 8, pal.ink2, true]);
           continue;
         }
-        const f = n.data.file!;
-        const fill = comparing ? growthColor(this.app, f.pathId) : fileColor(this.app, n.data, colorBy, pos);
+        const leaf = rep ?? n.data;
+        const f = leaf.file!;
+        const fill = comparing ? growthColor(this.app, f.pathId) : fileColor(this.app, leaf, colorBy, pos);
         const alpha = searchPaths && !searchPaths.has(f.pathId) ? 0.2 : 1;
-        p.rect(r.x0, r.y0, w, hh, fill, alpha);
+        const gk = alpha === 1 ? fill : `${fill}|${alpha}`;
+        let g = groups.get(gk);
+        if (!g) {
+          g = { fill, alpha, xywh: [] };
+          groups.set(gk, g);
+        }
+        g.xywh.push(r.x0, r.y0, w, hh);
         // Activity cue in every mode: a brief ring on files touched right now.
-        if (!comparing) {
+        if (!comparing && !rep && f.touched >= 0 && pos - f.touched < 400) {
           const ht = heat(this.app, f.touched, pos);
-          if (colorBy !== "heat" && ht > 0.15 && w > 2 && hh > 2) {
-            p.strokeRect(r.x0 + 0.75, r.y0 + 0.75, w - 1.5, hh - 1.5, f.lastDels > f.lastAdds ? pal.del : pal.add, 1.5, ht);
-          }
+          if (colorBy !== "heat" && ht > 0.15 && w > 2 && hh > 2) rings.push([r.x0 + 0.75, r.y0 + 0.75, w - 1.5, hh - 1.5, f.lastDels > f.lastAdds ? pal.del : pal.add, ht]);
           if (ht > 0.05) moving ||= s.playing;
         }
-        if (w > 46 && hh > 16) p.text(n.data.name, r.x0 + 4, r.y0 + 11, { color: inkOn(fill), size: 10, maxWidth: w - 8 });
+        if (!rep && w > 46 && hh > 16) labels.push([n.data.name, r.x0 + 4, r.y0 + 11, w - 8, inkOn(fill), false]);
       }
     }
-    if (this.shown.size > seen.size * 1.5 + 100) {
-      for (const id of this.shown.keys()) if (!seen.has(id)) this.shown.delete(id);
+    const useGl = this.onScreen && this.wantsGl();
+    if (useGl && this.gl) {
+      this.gl.begin();
+      this.gl.add(dirs, pal.dir);
+      for (const g of groups.values()) this.gl.add(g.xywh, g.fill, g.alpha);
+      this.gl.flush(this.width, this.height, this.canvas.width / this.width, pal.surface);
+    } else {
+      p.rects(dirs, pal.dir);
+      for (const g of groups.values()) p.rects(g.xywh, g.fill, g.alpha);
+    }
+    if (this.gl && useGl !== this.glActive) {
+      this.glActive = useGl;
+      this.gl.canvas.style.display = useGl ? "" : "none";
+    }
+    for (const [x, y, w, hh, c, a] of rings) p.strokeRect(x, y, w, hh, c, 1.5, a);
+    for (const [text, x, y, maxWidth, color, bold] of labels) {
+      p.text(text, x, y, bold ? { color, size: 10, weight: 600, baseline: "middle", maxWidth } : { color, size: 10, maxWidth });
     }
     if (this.hover) {
-      const r = this.shown.get(`${this.hover.pane.key}:${this.hover.node.data.id}`);
+      const r = this.hover.node.data.shown;
       if (r) p.strokeRect(r.x0 + 0.5, r.y0 + 0.5, r.x1 - r.x0 - 1, r.y1 - r.y0 - 1, pal.ink, 1.5);
     }
     this.moving = moving;

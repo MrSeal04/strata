@@ -147,7 +147,15 @@ export class TreeView extends View {
     // Folders with many loose files get them grouped under a synthetic "N files" node, so the
     // collapse below can fold them like a folder (a root with 400 files would otherwise be a ring).
     const LOOSE = 40;
-    const mk = (t: TNode): VNode => {
+    // Below the depth cap folders are collapsed straight away (no nodes built for their files:
+    // at Linux scale that is most of the tree).
+    const maxDepth = { radial: 4, force: 6, sunburst: 6, icicle: 6 }[this.app.store.get().settings.treeLayout];
+    const mk = (t: TNode, depth: number): VNode => {
+      if (t.isDir && depth >= maxDepth && depth > 0) {
+        const v: VNode = { id: t.id, t, children: [], collapsed: true, rep: null, leaves: 0, parent: null };
+        v.rep = largestFile(v);
+        return v;
+      }
       const kids = t.children ? stableChildren(t) : [];
       const files = kids.filter((c) => !c.isDir);
       const dirs = kids.filter((c) => c.isDir);
@@ -156,14 +164,14 @@ export class TreeView extends View {
         const g = new TNode(`${t.id}\u0000files`, `${files.length} files`, t, true, files[0].order);
         g.value = files.reduce((a, f) => a + (f.file?.lines ?? 0), 0);
         g.files = files.length;
-        const group: VNode = { id: g.id, t: g, children: files.map(mk), collapsed: false, rep: null, leaves: 0, parent: null, synthetic: true };
-        children = [...dirs.map(mk), group];
+        const group: VNode = { id: g.id, t: g, children: files.map((f) => mk(f, depth + 2)), collapsed: false, rep: null, leaves: 0, parent: null, synthetic: true };
+        children = [...dirs.map((d) => mk(d, depth + 1)), group];
       } else {
-        children = kids.map(mk);
+        children = kids.map((c) => mk(c, depth + 1));
       }
       return { id: t.id, t, children, collapsed: false, rep: null, leaves: 0, parent: null };
     };
-    const root = mk(display);
+    const root = mk(display, 0);
     // parent links + leaf counts
     const leafParents: VNode[] = [];
     const count = (v: VNode, parent: VNode | null): number => {
@@ -178,21 +186,6 @@ export class TreeView extends View {
       if (allLeaves && v !== root) leafParents.push(v);
       return (v.leaves = n);
     };
-    // Deep chains squeeze every shallow ring toward the center; fold folders below a depth cap
-    // (drill in to see deeper).
-    const maxDepth = { radial: 4, force: 6, sunburst: 6, icicle: 6 }[this.app.store.get().settings.treeLayout];
-    const fold = (v: VNode, depth: number) => {
-      if (!v.children.length) return;
-      if (depth >= maxDepth && v !== root) {
-        v.rep = largestFile(v);
-        v.children = [];
-        v.collapsed = true;
-        return;
-      }
-      for (const c of v.children) fold(c, depth + 1);
-    };
-    fold(root, 0);
-    leafParents.length = 0;
     let total = count(root, null);
     const cap = this.leafCapacity();
     if (total <= cap) return root;
@@ -347,7 +340,7 @@ export class TreeView extends View {
     const s = this.app.store.get();
     const tree = this.app.tree;
     const now = clock.now();
-    const throttle = s.playing ? (this.order.length > 3000 ? 200 : 60) : 0;
+    const throttle = s.playing ? (tree.files.size > 50_000 ? 800 : this.order.length > 3000 ? 200 : 60) : 0;
     if (this.builtKey !== this.key()) this.rebuild();
     else if (tree.rev !== this.builtRev) {
       if (now - this.builtAt >= throttle) this.rebuild();

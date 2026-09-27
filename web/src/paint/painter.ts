@@ -16,6 +16,8 @@ export interface Painter {
   readonly height: number;
   clear(fill: string): void;
   rect(x: number, y: number, w: number, h: number, fill: string, alpha?: number): void;
+  /** Many rects [x, y, w, h, ...] in one fill (large treemaps). */
+  rects(xywh: ArrayLike<number>, fill: string, alpha?: number): void;
   /** Rect with per-corner radii [tl, tr, br, bl]. */
   roundRect(x: number, y: number, w: number, h: number, r: [number, number, number, number], fill: string, alpha?: number): void;
   strokeRect(x: number, y: number, w: number, h: number, stroke: string, width: number, alpha?: number): void;

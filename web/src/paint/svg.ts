@@ -25,6 +25,14 @@ export class SvgPainter implements Painter {
     if (w <= 0 || h <= 0) return;
     this.out.push(`<rect x="${f(x)}" y="${f(y)}" width="${f(w)}" height="${f(h)}" fill="${fill}"${this.op(alpha)}/>`);
   }
+  rects(xywh: ArrayLike<number>, fill: string, alpha = 1) {
+    let d = "";
+    for (let i = 0; i + 3 < xywh.length; i += 4) {
+      if (xywh[i + 2] > 0 && xywh[i + 3] > 0) d += `M${f(xywh[i])},${f(xywh[i + 1])}h${f(xywh[i + 2])}v${f(xywh[i + 3])}h${f(-xywh[i + 2])}Z`;
+    }
+    if (d) this.out.push(`<path d="${d}" fill="${fill}"${this.op(alpha)}/>`);
+  }
+
   roundRect(x: number, y: number, w: number, h: number, r: [number, number, number, number], fill: string, alpha = 1) {
     if (w <= 0 || h <= 0) return;
     const m = Math.min(w / 2, h / 2);
