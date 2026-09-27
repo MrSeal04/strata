@@ -237,6 +237,7 @@ input[type="range"] { accent-color: var(--accent); }
 @media (max-width: 860px) {
   .frame { height: auto; min-height: 100%; }
   .dash {
+    align-content: start;
     grid-template-columns: 1fr;
     grid-template-rows: 340px 300px 220px 180px;
     grid-template-areas: "treemap" "tree" "area" "bars";

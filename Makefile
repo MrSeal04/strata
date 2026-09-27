@@ -2,7 +2,7 @@
 PREFIX ?= $(HOME)/.local
 CARGO  ?= cargo
 
-.PHONY: all web build bundled check test fixtures install dev clean
+.PHONY: all web build bundled check test smoke fixtures install dev clean
 
 all: build
 
@@ -29,6 +29,11 @@ check: web/node_modules
 	cd web && npx tsc --noEmit && npx vitest run
 
 test: check
+
+# Headless dashboard smoke test on a fixture (needs Chrome/Chromium).
+smoke: web
+	$(CARGO) build
+	node tools/smoke.mjs target/debug/strata
 
 fixtures:
 	fixtures/make.sh
