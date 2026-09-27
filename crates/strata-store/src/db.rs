@@ -22,6 +22,54 @@ pub struct Db {
     /// repo id -> schema name + parquet mtime fingerprint
     loaded: Mutex<HashMap<String, (String, String)>>,
     layout: Layout,
+    /// SQL -> Arrow IPC result. Cleared whenever a repo's tables are (re)loaded.
+    cache: Mutex<QueryCache>,
+    /// Serializes lazy aggregate creation.
+    agg_lock: Mutex<()>,
+}
+
+#[derive(Default)]
+struct QueryCache {
+    entries: HashMap<String, (std::sync::Arc<Vec<u8>>, u64)>,
+    bytes: usize,
+    tick: u64,
+}
+
+const CACHE_BYTES: usize = 256 << 20;
+
+impl QueryCache {
+    fn get(&mut self, sql: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+        self.tick += 1;
+        let tick = self.tick;
+        self.entries.get_mut(sql).map(|(v, t)| {
+            *t = tick;
+            v.clone()
+        })
+    }
+
+    fn put(&mut self, sql: &str, v: std::sync::Arc<Vec<u8>>) {
+        if v.len() > CACHE_BYTES / 4 {
+            return;
+        }
+        self.tick += 1;
+        self.bytes += v.len();
+        if let Some((old, _)) = self.entries.insert(sql.to_string(), (v, self.tick)) {
+            self.bytes -= old.len();
+        }
+        while self.bytes > CACHE_BYTES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, t))| *t)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some((v, _)) = self.entries.remove(&oldest) {
+                self.bytes -= v.len();
+            }
+        }
+    }
 }
 
 /// Query-time filters shared by every endpoint.
@@ -290,6 +338,8 @@ impl Db {
             pool: Mutex::new(Vec::new()),
             loaded: Mutex::new(HashMap::new()),
             layout,
+            cache: Mutex::new(QueryCache::default()),
+            agg_lock: Mutex::new(()),
         })
     }
 
@@ -302,6 +352,24 @@ impl Db {
             return Ok(c);
         }
         Ok(self.base.lock().unwrap().try_clone()?)
+    }
+
+    /// Drop cached query results (benchmarks measure cold queries).
+    pub fn clear_cache(&self) {
+        *self.cache.lock().unwrap() = QueryCache::default();
+    }
+
+    /// `ipc` with a result cache (every query is deterministic for a given loaded repo).
+    fn ipc_cached(&self, c: &Connection, sql: &str) -> anyhow::Result<Vec<u8>> {
+        if let Some(v) = self.cache.lock().unwrap().get(sql) {
+            return Ok(v.as_ref().clone());
+        }
+        let v = ipc(c, sql)?;
+        self.cache
+            .lock()
+            .unwrap()
+            .put(sql, std::sync::Arc::new(v.clone()));
+        Ok(v)
     }
 
     fn give_back(&self, c: Connection) {
@@ -408,6 +476,7 @@ impl Db {
         );
         conn.execute_batch(&sql)
             .with_context(|| format!("loading repo {repo}"))?;
+        *self.cache.lock().unwrap() = QueryCache::default();
         loaded.insert(repo.to_string(), (schema.clone(), fp));
         Ok(schema)
     }
@@ -427,7 +496,7 @@ impl Db {
     /// Path dictionary.
     pub fn paths(&self, repo: &str) -> anyhow::Result<Vec<u8>> {
         self.with(repo, |c, s| {
-            ipc(c, &format!("SELECT path_id, path, lang, category, first_step, last_step FROM {s}.paths ORDER BY path_id"))
+            self.ipc_cached(c, &format!("SELECT path_id, path, lang, category, first_step, last_step FROM {s}.paths ORDER BY path_id"))
         })
     }
 
@@ -452,11 +521,12 @@ impl Db {
                  FROM {s}.steps"
             ))?;
             let tags = json_rows(c, &format!("SELECT name, step, time::DOUBLE AS time, on_main FROM {s}.tags ORDER BY step, name"))?;
+            // Languages at the tip: the file state at the last step (keyframe + later changes).
+            let last: u32 = c.query_row(&format!("SELECT coalesce(max(step), 0)::UINTEGER FROM {s}.steps"), [], |r| r.get(0))?;
             let langs = json_rows(c, &format!(
-                "SELECT p.lang, count(*)::INTEGER AS files, sum(c.lines_after)::DOUBLE AS lines
-                 FROM {s}.paths p JOIN (SELECT path_id, arg_max(lines_after, step) AS lines_after, arg_max(kind, step) AS kind
-                                         FROM {s}.changes GROUP BY path_id) c USING (path_id)
-                 WHERE c.kind NOT IN (2, 4) GROUP BY p.lang ORDER BY lines DESC"
+                "SELECT p.lang, count(*)::INTEGER AS files, sum(st.lines)::DOUBLE AS lines
+                 FROM ({state}) st JOIN {s}.paths p USING (path_id) GROUP BY p.lang ORDER BY lines DESC",
+                state = state_sql(s, last, &Filters::default()),
             ))?;
             let cats = json_rows(c, &format!(
                 "SELECT category, count(*)::INTEGER AS paths FROM {s}.paths GROUP BY category ORDER BY category"
@@ -476,7 +546,7 @@ impl Db {
     pub fn bars(&self, repo: &str, f: &Filters, b: &Bins) -> anyhow::Result<Vec<u8>> {
         self.with(repo, |c, s| {
             let (bin, below_hi) = b.bin_expr();
-            ipc(c, &format!(
+            self.ipc_cached(c, &format!(
                 "WITH ch AS (
                    SELECT c.step, sum(c.{a})::BIGINT AS a, sum(c.{d})::BIGINT AS d
                    FROM {s}.changes c JOIN {s}.paths p USING (path_id)
@@ -506,81 +576,194 @@ impl Db {
     ) -> anyhow::Result<Vec<u8>> {
         self.with(repo, |c, s| {
             let (bin, below_hi) = b.bin_expr();
-            let root = f.root.trim_matches('/');
-            let rel = if root.is_empty() {
-                "p.path".to_string()
-            } else {
-                format!("substr(p.path, {})", root.len() + 2)
-            };
-            let depth = q.depth.clamp(1, 8);
-            let key_dir = format!(
-                "CASE WHEN len(string_split({rel}, '/')) > {depth}
-                      THEN array_to_string(string_split({rel}, '/')[1:{depth}], '/')
-                      ELSE coalesce(nullif(array_to_string(string_split({rel}, '/')[1:-2], '/'), ''), '(files)') END"
-            );
-            let unit = match q.unit.as_str() {
-                "month" => "strftime(make_date(1970 + (o.cohort // 12), 1 + (o.cohort % 12), 1), '%Y-%m')",
-                "quarter" => "(1970 + (o.cohort // 12))::VARCHAR || '-Q' || (1 + (o.cohort % 12) // 3)::VARCHAR",
-                _ => "(1970 + (o.cohort // 12))::VARCHAR",
-            };
-            let (source, key, v, a, d) = match q.slice {
-                Slice::Dir | Slice::Lang => (
-                    format!("{s}.changes c JOIN {s}.paths p USING (path_id)"),
-                    if q.slice == Slice::Dir { key_dir } else { "p.lang".into() },
-                    "c.line_delta".to_string(),
-                    format!("c.{}", f.adds()),
-                    format!("c.{}", f.dels()),
-                ),
-                Slice::Author | Slice::Cohort => (
-                    format!("{s}.origin_deltas o JOIN {s}.paths p USING (path_id) JOIN {s}.canon k ON k.author_id = o.author_id"),
-                    if q.slice == Slice::Author { "k.name".into() } else { unit.to_string() },
-                    "o.delta".to_string(),
-                    "greatest(o.delta, 0)".to_string(),
-                    "greatest(-o.delta, 0)".to_string(),
-                ),
-            };
-            let bot = if f.hide_bots && q.slice == Slice::Author { "AND NOT k.is_bot" } else { "" };
-            let step_col = if matches!(q.slice, Slice::Dir | Slice::Lang) { "c.step" } else { "o.step" };
-            let base = format!(
-                "WITH k0 AS (
-                   SELECT {step_col} AS step, {key} AS key, sum({v})::BIGINT AS v, sum({a})::BIGINT AS a, sum({d})::BIGINT AS d
-                   FROM {source} WHERE {pp} {bot} GROUP BY ALL),
-                 b AS (
-                   SELECT {bin} AS bin, k0.key, sum(v)::BIGINT AS v, sum(a)::BIGINT AS a, sum(d)::BIGINT AS d
-                   FROM k0 JOIN {s}.steps s USING (step) WHERE {below_hi} GROUP BY ALL)",
-                pp = f.path_pred(),
-            );
+            let pp = f.path_pred();
+            let filtered = pp != "TRUE";
             let top = q.top.clamp(1, 60);
+            // k0: per (step, key) sums. Keys are computed once per path (dir/lang) or are integers
+            // (author/cohort) so the per-change work is only joins and sums.
+            // Common case (no folder filter; language filter only for the language slice): read a
+            // per-repo aggregate by (step, key, category), built on first use, instead of every
+            // change or survival row.
+            let simple = f.root.trim_matches('/').is_empty() && (f.langs.is_empty() || q.slice == Slice::Lang);
+            let agg = if simple { Some(self.ensure_area_agg(c, s, q)?) } else { None };
+            let (k0, label) = match (q.slice, agg) {
+                (_, Some(table)) => {
+                    let mut pred = vec!["TRUE".to_string()];
+                    if !f.exclude.is_empty() {
+                        pred.push(format!("category NOT IN ({})", f.exclude.iter().map(u8::to_string).collect::<Vec<_>>().join(",")));
+                    }
+                    if q.slice == Slice::Lang && !f.langs.is_empty() {
+                        pred.push(format!("key IN ({})", f.langs.iter().map(|l| sql_str(l)).collect::<Vec<_>>().join(",")));
+                    }
+                    if q.slice == Slice::Author && f.hide_bots {
+                        pred.push("NOT is_bot".into());
+                    }
+                    let (a, d) = if f.ws && matches!(q.slice, Slice::Dir | Slice::Lang) { ("aw", "dw") } else { ("a", "d") };
+                    let key = match (q.slice, q.unit.as_str()) {
+                        (Slice::Cohort, "month") => "key",
+                        (Slice::Cohort, "quarter") => "key // 3",
+                        (Slice::Cohort, _) => "key // 12",
+                        _ => "key",
+                    };
+                    let label = match (q.slice, q.unit.as_str()) {
+                        (Slice::Author, _) => format!("coalesce((SELECT any_value(name) FROM {s}.canon WHERE canonical_id = key), 'author ' || key::VARCHAR)"),
+                        (Slice::Cohort, "month") => "strftime(make_date(1970 + (key // 12)::INTEGER, 1 + (key % 12)::INTEGER, 1), '%Y-%m')".to_string(),
+                        (Slice::Cohort, "quarter") => "(1970 + key // 4)::VARCHAR || '-Q' || (1 + key % 4)::VARCHAR".to_string(),
+                        (Slice::Cohort, _) => "(1970 + key)::VARCHAR".to_string(),
+                        _ => "key".to_string(),
+                    };
+                    (
+                        format!(
+                            "k0 AS (SELECT step, {key} AS key, sum(v)::BIGINT AS v, sum({a})::BIGINT AS a, sum({d})::BIGINT AS d
+                                    FROM {s}.{table} WHERE {pred} GROUP BY ALL)",
+                            pred = pred.join(" AND ")
+                        ),
+                        label,
+                    )
+                }
+                (Slice::Dir | Slice::Lang, None) => {
+                    let root = f.root.trim_matches('/');
+                    let rel = if root.is_empty() { "p.path".to_string() } else { format!("substr(p.path, {})", root.len() + 2) };
+                    let depth = q.depth.clamp(1, 8);
+                    let key = if q.slice == Slice::Lang {
+                        "p.lang".to_string()
+                    } else {
+                        format!(
+                            "CASE WHEN len(string_split({rel}, '/')) > {depth}
+                                  THEN array_to_string(string_split({rel}, '/')[1:{depth}], '/')
+                                  ELSE coalesce(nullif(array_to_string(string_split({rel}, '/')[1:-2], '/'), ''), '(files)') END"
+                        )
+                    };
+                    (
+                        format!(
+                            "pk AS (SELECT path_id, {key} AS key FROM {s}.paths p WHERE {pp}),
+                             k0 AS (SELECT c.step, pk.key, sum(c.line_delta)::BIGINT AS v, sum(c.{a})::BIGINT AS a,
+                                           sum(c.{d})::BIGINT AS d
+                                    FROM {s}.changes c JOIN pk USING (path_id) GROUP BY ALL)",
+                            a = f.adds(),
+                            d = f.dels(),
+                        ),
+                        "key".to_string(),
+                    )
+                }
+                (Slice::Author | Slice::Cohort, None) => {
+                    let paths = if filtered { format!("AND o.path_id IN (SELECT path_id FROM {s}.paths p WHERE {pp})") } else { String::new() };
+                    let (key, join, bots) = if q.slice == Slice::Author {
+                        let bots = if f.hide_bots { "AND NOT k.is_bot" } else { "" };
+                        ("k.canonical_id::BIGINT", format!("JOIN {s}.canon k ON k.author_id = o.author_id"), bots)
+                    } else {
+                        let div = match q.unit.as_str() {
+                            "month" => 1,
+                            "quarter" => 3,
+                            _ => 12,
+                        };
+                        (if div == 1 { "o.cohort::BIGINT" } else { if div == 3 { "(o.cohort // 3)::BIGINT" } else { "(o.cohort // 12)::BIGINT" } }, String::new(), "")
+                    };
+                    let label = match (q.slice, q.unit.as_str()) {
+                        (Slice::Author, _) => format!("coalesce((SELECT any_value(name) FROM {s}.canon WHERE canonical_id = key), 'author ' || key::VARCHAR)"),
+                        (_, "month") => "strftime(make_date(1970 + (key // 12)::INTEGER, 1 + (key % 12)::INTEGER, 1), '%Y-%m')".to_string(),
+                        (_, "quarter") => "(1970 + key // 4)::VARCHAR || '-Q' || (1 + key % 4)::VARCHAR".to_string(),
+                        _ => "(1970 + key)::VARCHAR".to_string(),
+                    };
+                    (
+                        format!(
+                            "k0 AS (SELECT o.step, {key} AS key, sum(o.delta)::BIGINT AS v,
+                                           sum(greatest(o.delta, 0))::BIGINT AS a, sum(greatest(-o.delta, 0))::BIGINT AS d
+                                    FROM {s}.origin_deltas o {join} WHERE TRUE {paths} {bots} GROUP BY ALL)"
+                        ),
+                        label,
+                    )
+                }
+            };
+            let base = format!(
+                "WITH {k0},
+                 b AS (SELECT {bin} AS bin, k0.key, sum(v)::BIGINT AS v, sum(a)::BIGINT AS a, sum(d)::BIGINT AS d
+                       FROM k0 JOIN {s}.steps s USING (step) WHERE {below_hi} GROUP BY ALL)"
+            );
             let sql = match q.mode {
                 AreaMode::Size => format!(
                     "{base},
                      cum AS (SELECT key, bin, sum(v) OVER (PARTITION BY key ORDER BY bin ROWS UNBOUNDED PRECEDING) AS c FROM b),
                      rk AS (SELECT key FROM cum GROUP BY key ORDER BY max(c) DESC, key LIMIT {top}),
-                     lab AS (SELECT bin, CASE WHEN key IN (SELECT key FROM rk) THEN key ELSE '(other)' END AS key, v FROM b),
-                     g AS (SELECT bin, key, sum(v)::BIGINT AS v FROM lab GROUP BY ALL)
+                     g AS (SELECT bin, CASE WHEN key IN (SELECT key FROM rk) THEN {label} ELSE '(other)' END AS key,
+                                  sum(v)::BIGINT AS v
+                           FROM b GROUP BY ALL)
                      SELECT bin, key, (sum(v) OVER (PARTITION BY key ORDER BY bin ROWS UNBOUNDED PRECEDING))::DOUBLE AS value
                      FROM g ORDER BY bin, key"
                 ),
                 AreaMode::Flow => format!(
                     "{base},
-                     rk AS (SELECT key FROM b WHERE bin >= 0 GROUP BY key ORDER BY sum(a + d) DESC, key LIMIT {top}),
-                     lab AS (SELECT bin, CASE WHEN key IN (SELECT key FROM rk) THEN key ELSE '(other)' END AS key, a, d FROM b WHERE bin >= 0)
-                     SELECT bin, key, sum(a)::DOUBLE AS adds, sum(d)::DOUBLE AS dels FROM lab GROUP BY ALL ORDER BY bin, key"
+                     rk AS (SELECT key FROM b WHERE bin >= 0 GROUP BY key ORDER BY sum(a + d) DESC, key LIMIT {top})
+                     SELECT bin, CASE WHEN key IN (SELECT key FROM rk) THEN {label} ELSE '(other)' END AS key,
+                            sum(a)::DOUBLE AS adds, sum(d)::DOUBLE AS dels
+                     FROM b WHERE bin >= 0 GROUP BY ALL ORDER BY bin, key"
                 ),
             };
-            ipc(c, &sql)
+            self.ipc_cached(c, &sql)
         })
+    }
+
+    /// Build (once per loaded repo) the aggregate an area query reads; returns its table name.
+    fn ensure_area_agg(&self, c: &Connection, s: &str, q: &AreaQuery) -> anyhow::Result<String> {
+        let (table, sql) = match q.slice {
+            Slice::Dir | Slice::Lang => {
+                let depth = q.depth.clamp(1, 8);
+                let (table, key) = if q.slice == Slice::Lang {
+                    ("agg_lang".to_string(), "p.lang".to_string())
+                } else {
+                    (
+                        format!("agg_dir{depth}"),
+                        format!(
+                            "CASE WHEN len(string_split(p.path, '/')) > {depth}
+                                  THEN array_to_string(string_split(p.path, '/')[1:{depth}], '/')
+                                  ELSE coalesce(nullif(array_to_string(string_split(p.path, '/')[1:-2], '/'), ''), '(files)') END"
+                        ),
+                    )
+                };
+                let sql = format!(
+                    "CREATE TABLE IF NOT EXISTS {s}.{table} AS
+                     WITH pk AS (SELECT path_id, {key} AS key, category FROM {s}.paths p)
+                     SELECT c.step, pk.key, pk.category, sum(c.line_delta)::BIGINT AS v, sum(c.adds)::BIGINT AS a,
+                            sum(c.dels)::BIGINT AS d, sum(c.adds_ws)::BIGINT AS aw, sum(c.dels_ws)::BIGINT AS dw
+                     FROM {s}.changes c JOIN pk USING (path_id) GROUP BY ALL"
+                );
+                (table, sql)
+            }
+            Slice::Author => (
+                "agg_author".to_string(),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS {s}.agg_author AS
+                     SELECT o.step, k.canonical_id::BIGINT AS key, p.category, k.is_bot, sum(o.delta)::BIGINT AS v,
+                            sum(greatest(o.delta, 0))::BIGINT AS a, sum(greatest(-o.delta, 0))::BIGINT AS d
+                     FROM {s}.origin_deltas o JOIN {s}.paths p USING (path_id) JOIN {s}.canon k ON k.author_id = o.author_id
+                     GROUP BY ALL"
+                ),
+            ),
+            Slice::Cohort => (
+                "agg_cohort".to_string(),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS {s}.agg_cohort AS
+                     SELECT o.step, o.cohort::BIGINT AS key, p.category, sum(o.delta)::BIGINT AS v,
+                            sum(greatest(o.delta, 0))::BIGINT AS a, sum(greatest(-o.delta, 0))::BIGINT AS d
+                     FROM {s}.origin_deltas o JOIN {s}.paths p USING (path_id) GROUP BY ALL"
+                ),
+            ),
+        };
+        let _guard = self.agg_lock.lock().unwrap();
+        c.execute_batch(&sql)
+            .with_context(|| format!("building {table}"))?;
+        Ok(table)
     }
 
     /// File state after `step`: nearest keyframe plus later changes.
     pub fn state(&self, repo: &str, step: u32, f: &Filters) -> anyhow::Result<Vec<u8>> {
-        self.with(repo, |c, s| ipc(c, &state_sql(s, step, f)))
+        self.with(repo, |c, s| self.ipc_cached(c, &state_sql(s, step, f)))
     }
 
     /// Change events in (from, to], for forward playback.
     pub fn events(&self, repo: &str, from: i64, to: u32, f: &Filters) -> anyhow::Result<Vec<u8>> {
         self.with(repo, |c, s| {
-            ipc(c, &format!(
+            self.ipc_cached(c, &format!(
                 "SELECT c.step::INTEGER AS step, c.path_id, c.kind, c.{a}::INTEGER AS adds, c.{d}::INTEGER AS dels,
                         c.lines_after::INTEGER AS lines, c.bytes_after::DOUBLE AS bytes,
                         c.mean_origin_time::DOUBLE AS mot, k.canonical_id AS top_author, c.top_share, c.is_binary AS binary,
@@ -596,7 +779,7 @@ impl Db {
     /// Per-path lines at two steps.
     pub fn compare(&self, repo: &str, a: u32, b: u32, f: &Filters) -> anyhow::Result<Vec<u8>> {
         self.with(repo, |c, s| {
-            ipc(c, &format!(
+            self.ipc_cached(c, &format!(
                 "WITH sa AS ({qa}), sb AS ({qb})
                  SELECT coalesce(sa.path_id, sb.path_id) AS path_id, coalesce(sa.lines, 0)::INTEGER AS lines_a,
                         coalesce(sb.lines, 0)::INTEGER AS lines_b

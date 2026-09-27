@@ -247,20 +247,24 @@ pub fn run(layout: Layout, args: BenchArgs) -> anyhow::Result<()> {
         ("dirs", Box::new(|| Ok(db.dirs(&id, "", &f)?.len()))),
     ];
     println!(
-        "{:<16}{:>10}{:>10}{:>12}",
-        "query", "p50 ms", "p95 ms", "bytes"
+        "{:<16}{:>10}{:>10}{:>10}{:>12}",
+        "query", "cold p50", "cold p95", "cached", "bytes"
     );
     for (name, q) in &queries {
         let mut times = Vec::new();
         let mut bytes = 0;
         for _ in 0..args.reps.max(1) {
+            db.clear_cache();
             let t = Instant::now();
             bytes = q()?;
             times.push(t.elapsed().as_secs_f64() * 1e3);
         }
+        let t = Instant::now();
+        q()?;
+        let warm = t.elapsed().as_secs_f64() * 1e3;
         times.sort_by(f64::total_cmp);
         println!(
-            "{name:<16}{:>10.1}{:>10.1}{bytes:>12}",
+            "{name:<16}{:>10.1}{:>10.1}{warm:>10.1}{bytes:>12}",
             percentile(&times, 0.5),
             percentile(&times, 0.95)
         );

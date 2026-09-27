@@ -386,3 +386,120 @@ fn shallow_clone_starts_with_an_import_step() {
     // HEAD of `linear` has 12 + 7 + 1 lines.
     assert_eq!(lines, 20);
 }
+
+/// Last-bin totals of a size-mode area query (decoded from Arrow IPC).
+fn area_total(bytes: &[u8]) -> f64 {
+    use arrow::array::{Array, Float64Array, Int32Array};
+    let reader =
+        arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None).unwrap();
+    let mut last: std::collections::HashMap<String, (i32, f64)> = Default::default();
+    for batch in reader {
+        let b = batch.unwrap();
+        let bins = b
+            .column_by_name("bin")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap()
+            .clone();
+        let keys = arrow::compute::cast(
+            b.column_by_name("key").unwrap(),
+            &arrow::datatypes::DataType::Utf8,
+        )
+        .unwrap();
+        let keys = keys
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap()
+            .clone();
+        let vals = b
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .clone();
+        for i in 0..b.num_rows() {
+            let e = last
+                .entry(keys.value(i).to_string())
+                .or_insert((i32::MIN, 0.0));
+            if bins.value(i) >= e.0 {
+                *e = (bins.value(i), vals.value(i));
+            }
+        }
+    }
+    last.values().map(|(_, v)| v).sum()
+}
+
+#[test]
+fn area_aggregates_match_direct_queries() {
+    let repo = fixtures().join("kitchen");
+    let home = tempfile::tempdir().unwrap();
+    let layout = Layout::new(home.path().to_path_buf());
+    let id = extract(&layout, &repo);
+    let db = Db::new(layout.clone()).unwrap();
+    let bins = strata_store::Bins {
+        axis: strata_store::Axis::Index,
+        lo: 0.0,
+        hi: 9.0,
+        bins: 9,
+    };
+    for exclude in [vec![], vec![4u8, 5, 6, 7]] {
+        let ex = exclude
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let want: f64 = db
+            .with(&id, |c, s| {
+                let cat = if ex.is_empty() { String::new() } else { format!("WHERE p.category NOT IN ({ex})") };
+                Ok(c.query_row(
+                    &format!("SELECT coalesce(sum(line_delta), 0)::DOUBLE FROM {s}.changes JOIN {s}.paths p USING (path_id) {cat}"),
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        for slice in [
+            strata_store::Slice::Dir,
+            strata_store::Slice::Lang,
+            strata_store::Slice::Author,
+            strata_store::Slice::Cohort,
+        ] {
+            let q = strata_store::AreaQuery {
+                slice,
+                mode: strata_store::AreaMode::Size,
+                depth: 1,
+                top: 60,
+                unit: "month".into(),
+            };
+            let f = Filters {
+                exclude: exclude.clone(),
+                ..Default::default()
+            };
+            let got = area_total(&db.area(&id, &f, &bins, &q).unwrap());
+            assert_eq!(got, want, "{slice:?} aggregated total (exclude {ex})");
+            // A folder filter forces the direct (non-aggregated) query; "app" is one subtree.
+            let f_root = Filters {
+                exclude: exclude.clone(),
+                root: "app".into(),
+                ..Default::default()
+            };
+            let direct = area_total(&db.area(&id, &f_root, &bins, &q).unwrap());
+            let under_app: f64 = db
+                .with(&id, |c, s| {
+                    let cat = if ex.is_empty() { String::new() } else { format!("AND p.category NOT IN ({ex})") };
+                    Ok(c.query_row(
+                        &format!("SELECT coalesce(sum(line_delta), 0)::DOUBLE FROM {s}.changes JOIN {s}.paths p USING (path_id) WHERE p.path LIKE 'app/%' {cat}"),
+                        [],
+                        |r| r.get(0),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(
+                direct, under_app,
+                "{slice:?} direct total under app/ (exclude {ex})"
+            );
+        }
+    }
+}
