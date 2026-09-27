@@ -438,7 +438,10 @@ pub fn app_state(cfg: &ServerConfig) -> anyhow::Result<Shared> {
 pub async fn bind(
     cfg: &ServerConfig,
     state: Shared,
-) -> anyhow::Result<(SocketAddr, impl Future<Output = std::io::Result<()>>)> {
+) -> anyhow::Result<(
+    SocketAddr,
+    impl Future<Output = std::io::Result<()>> + use<>,
+)> {
     let mut last_err = None;
     for port in cfg.port..cfg.port.saturating_add(20) {
         match tokio::net::TcpListener::bind((cfg.host.as_str(), port)).await {

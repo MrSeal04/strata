@@ -21,4 +21,6 @@ export interface App {
   openCommit(step: number): void;
   /** Playback speed in steps per second for the current mode (for heat decay). */
   stepsPerSecond(): number;
+  /** Set by the video exporter so heat decays at the video's pace. */
+  exportRate: number | null;
 }

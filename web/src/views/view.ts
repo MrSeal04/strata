@@ -1,3 +1,4 @@
+import { clock } from "../clock";
 import { CanvasPainter } from "../paint/canvas";
 import type { Painter } from "../paint/painter";
 import { palette } from "../theme";
@@ -78,7 +79,8 @@ export abstract class View {
   }
 
   drawNow() {
-    if (this.width <= 1 || this.height <= 1) return;
+    // During video export frames are painted by the exporter (with virtual time); the screen waits.
+    if (this.width <= 1 || this.height <= 1 || clock.exporting) return;
     const dpr = this.canvas.width / this.width;
     const ctx = this.canvas.getContext("2d");
     if (!ctx) return;

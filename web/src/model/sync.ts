@@ -36,6 +36,14 @@ export class StateSync {
     void this.goto(this.store.get().cursor);
   }
 
+  /** Move to `step` and resolve once the tree reflects it. */
+  async settle(step: number): Promise<void> {
+    for (let tries = 0; tries < 200 && this.tree.step !== step; tries++) {
+      await this.goto(step);
+      if (this.tree.step !== step) await new Promise((r) => setTimeout(r, 15));
+    }
+  }
+
   async goto(step: number) {
     this.pending = step;
     if (this.busy) return;

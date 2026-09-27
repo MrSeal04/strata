@@ -9,6 +9,7 @@ import { palette } from "../theme";
 import { fmt, h } from "../ui/dom";
 import { tipRow, tooltip } from "../ui/tooltip";
 import { fileColor, heat } from "./treemap";
+import { clock } from "../clock";
 import { renderColorLegend } from "./colorlegend";
 import { View } from "./view";
 
@@ -188,7 +189,7 @@ export class TreeView extends View {
     this.order = order;
     this.parentIdx = Int32Array.from(parents);
     this.builtRev = tree.rev;
-    this.builtAt = performance.now();
+    this.builtAt = clock.now();
     this.builtKey = this.key();
     this.layout();
   }
@@ -292,7 +293,7 @@ export class TreeView extends View {
     const pal = palette();
     const s = this.app.store.get();
     const tree = this.app.tree;
-    const now = performance.now();
+    const now = clock.now();
     const throttle = s.playing ? (this.order.length > 3000 ? 200 : 60) : 0;
     if (this.builtKey !== this.key()) this.rebuild();
     else if (tree.rev !== this.builtRev) {
@@ -305,7 +306,7 @@ export class TreeView extends View {
     }
     const dt = this.lastFrame ? Math.min(100, now - this.lastFrame) : 16;
     this.lastFrame = now;
-    const k = this.exporting ? 1 : 1 - Math.exp(-dt / 90);
+    const k = 1 - Math.exp(-dt / 90);
     let moving = false;
     const kind = s.settings.treeLayout;
     // ease shown geometry toward targets; new nodes start at their parent

@@ -58,7 +58,9 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
     authors,
     authorName: (id) => byId.get(id)?.name ?? (id >= 0 ? `author ${id}` : "unknown"),
     openCommit: (step) => void openCommit(app, step),
+    exportRate: null,
     stepsPerSecond: () => {
+      if (app.exportRate) return app.exportRate;
       const s = store.get();
       const [a, b] = s.brush ?? [0, Math.max(0, s.steps - 1)];
       return (b - a + 1) / Math.max(0.1, runDuration(s.settings, tl, a, b));

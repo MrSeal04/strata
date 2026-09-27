@@ -8,6 +8,7 @@ import type { ColorBy } from "../state/store";
 import { palette } from "../theme";
 import { fmt, h } from "../ui/dom";
 import { tipRow, tooltip } from "../ui/tooltip";
+import { clock } from "../clock";
 import { renderColorLegend } from "./colorlegend";
 import { View } from "./view";
 
@@ -135,7 +136,7 @@ export class TreemapView extends View {
     this.root = root as LNode;
     this.nodes = this.root.descendants().filter((n) => n.x1 - n.x0 >= 0.3 && n.y1 - n.y0 >= 0.3 && n.value! > 0);
     this.layoutRev = tree.rev;
-    this.layoutAt = performance.now();
+    this.layoutAt = clock.now();
     this.layoutW = W;
     this.layoutH = H;
   }
@@ -148,7 +149,7 @@ export class TreemapView extends View {
     const pal = palette();
     const tree = this.app.tree;
     const s = this.app.store.get();
-    const now = performance.now();
+    const now = clock.now();
     const big = this.nodes.length > 20_000;
     const throttle = s.playing ? (big ? 250 : 60) : 0;
     const sizeChanged = this.width !== this.layoutW || this.height !== this.layoutH;
@@ -161,7 +162,7 @@ export class TreemapView extends View {
     // Ease shown rects toward the layout.
     const dt = this.lastFrame ? Math.min(100, now - this.lastFrame) : 16;
     this.lastFrame = now;
-    const k = sizeChanged || this.exporting ? 1 : 1 - Math.exp(-dt / 70);
+    const k = sizeChanged ? 1 : 1 - Math.exp(-dt / 70);
     let moving = false;
     const pos = s.pos;
     const colorBy = s.settings.colorBy;

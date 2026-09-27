@@ -14,6 +14,7 @@ async function route() {
   current = null;
   const hash = location.hash.replace(/^#/, "") || "/";
   const m = hash.match(/^\/r\/([^?]+)(?:\?job=(\w+))?/);
+  const renderToken = new URLSearchParams(location.search).get("render");
   if (!m) {
     await renderHome(root);
     return;
@@ -40,6 +41,10 @@ async function route() {
     }
     current = d;
     (window as unknown as { strata: Dashboard }).strata = d;
+    if (renderToken) {
+      const { runHeadlessRender } = await import("./export/video");
+      await runHeadlessRender(d, renderToken);
+    }
   } catch (e) {
     root.replaceChildren(h("main", { class: "loading-box" }, h("h1", { text: repo, style: "font-size:20px" }), h("div", { class: "err", text: e instanceof Error ? e.message : String(e) }), h("a", { class: "btn", href: "#/", text: "All repositories" })));
   }
