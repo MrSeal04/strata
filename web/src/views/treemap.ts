@@ -107,6 +107,15 @@ export class TreemapView extends View {
   private panes: Pane[] = [];
   /** Last rects of files that were just renamed away (so the new path can glide from there). */
   private renameRects = new Map<string, Rect>();
+  /** Rects still easing toward the layout (separate from heat-only animation). */
+  private geomMoving = false;
+  /** Last frame's paint batches (reused while nothing moves). */
+  private frame: {
+    key: string;
+    dirs: number[];
+    groups: Map<string, { fill: string; alpha: number; xywh: number[] }>;
+    labels: [string, number, number, number, string, boolean][];
+  } | null = null;
   /** Folders drawn as a single rect (too small to show their files): folder -> its largest file. */
   private lod = new WeakMap<TNode, TNode>();
   private layoutKey = "";
@@ -282,11 +291,38 @@ export class TreemapView extends View {
     const colorBy = s.settings.colorBy;
     const searchPaths = s.search?.kind === "path" && s.search.paths.size ? s.search.paths : null;
     const comparing = !!(s.compare && this.app.compare.data);
-    // Collect first, then paint in batches: one fill per color instead of 100k fillStyle changes.
-    const dirs: number[] = [];
-    const groups = new Map<string, { fill: string; alpha: number; xywh: number[] }>();
+    // Nothing moved and no color input changed: reuse last frame's batches; only the activity
+    // rings (a few recently touched files) are recomputed. Most playback frames at scale.
+    const colorKey = `${this.layoutKey}|${colorBy}|${s.settings.theme}|${s.settings.diffColors}|${comparing}|${this.app.compare.data?.key ?? ""}|${s.search?.q ?? ""}|${colorBy === "age" ? s.cursor : colorBy === "heat" ? pos : ""}`;
+    const reuse = !this.geomMoving && k < 1 && this.frame?.key === colorKey;
+    let geom = false;
+    let dirs: number[];
+    let groups: Map<string, { fill: string; alpha: number; xywh: number[] }>;
+    let labels: [string, number, number, number, string, boolean][];
     const rings: [number, number, number, number, string, number][] = [];
-    const labels: [string, number, number, number, string, boolean][] = [];
+    if (reuse && this.frame) {
+      ({ dirs, groups, labels } = this.frame);
+      if (!comparing && colorBy !== "heat") {
+        const seenRing = new Set<number>();
+        for (let i = this.app.tree.recent.length - 1; i >= 0; i--) {
+          const pid = this.app.tree.recent[i];
+          if (seenRing.has(pid)) continue;
+          seenRing.add(pid);
+          const node = this.app.tree.leaf(pid);
+          const f = node?.file;
+          const r = node?.shown;
+          if (!f || !r || f.touched < 0 || pos - f.touched > 400) continue;
+          const ht = heat(this.app, f.touched, pos);
+          const w = r.x1 - r.x0;
+          const hh = r.y1 - r.y0;
+          if (ht > 0.15 && w > 2 && hh > 2) rings.push([r.x0 + 0.75, r.y0 + 0.75, w - 1.5, hh - 1.5, f.lastDels > f.lastAdds ? pal.del : pal.add, ht]);
+          if (ht > 0.05) moving ||= s.playing;
+        }
+      }
+    } else {
+    dirs = [];
+    groups = new Map();
+    labels = [];
     for (const pane of this.panes) {
       if (pane.label) labels.push([pane.label, pane.x + 4, 11, pane.w - 8, pal.ink2, true]);
       for (const n of pane.nodes) {
@@ -303,7 +339,7 @@ export class TreemapView extends View {
           r.y0 += (n.y0 - r.y0) * k;
           r.x1 += (n.x1 - r.x1) * k;
           r.y1 += (n.y1 - r.y1) * k;
-          if (!moving && Math.abs(r.x0 - n.x0) + Math.abs(r.y0 - n.y0) + Math.abs(r.x1 - n.x1) + Math.abs(r.y1 - n.y1) > 0.6) moving = true;
+          if (!geom && Math.abs(r.x0 - n.x0) + Math.abs(r.y0 - n.y0) + Math.abs(r.x1 - n.x1) + Math.abs(r.y1 - n.y1) > 0.6) geom = true;
         } else {
           r.x0 = n.x0;
           r.y0 = n.y0;
@@ -340,6 +376,8 @@ export class TreemapView extends View {
         if (!rep && w > 46 && hh > 16) labels.push([n.data.name, r.x0 + 4, r.y0 + 11, w - 8, inkOn(fill), false]);
       }
     }
+    this.frame = { key: colorKey, dirs, groups, labels };
+    }
     const useGl = this.onScreen && this.wantsGl();
     if (useGl && this.gl) {
       this.gl.begin();
@@ -362,7 +400,8 @@ export class TreemapView extends View {
       const r = this.hover.node.data.shown;
       if (r) p.strokeRect(r.x0 + 0.5, r.y0 + 0.5, r.x1 - r.x0 - 1, r.y1 - r.y0 - 1, pal.ink, 1.5);
     }
-    this.moving = moving;
+    this.geomMoving = geom;
+    this.moving = moving || geom;
   }
 
   private hit(x: number, y: number): { pane: Pane; node: LNode } | null {

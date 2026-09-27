@@ -148,6 +148,40 @@ export class BarsView extends View {
   }
 
   draw(p: Painter) {
+    this.drawStatic(p);
+    this.drawOverlay(p);
+  }
+
+  protected staticKey(): string | null {
+    const s = this.app.store.get();
+    const st = s.settings;
+    return `${this.data?.key}|${st.barScale}|${st.clampPct}|${s.search?.q}|${s.search?.steps.length}|${this.width}x${this.height}`;
+  }
+
+  protected drawOverlay(p: Painter) {
+    const pal = palette();
+    const m = this.strip.m;
+    const plotBottom = this.height - m.bottom;
+    this.strip.update(this.width);
+    const d = this.data;
+    if (d && this.hoverBin >= 0 && this.hoverBin < d.bin.length) {
+      const { clamp, base, sc } = this.geometry();
+      let [x0, x1] = this.binPx(this.hoverBin);
+      const slot = x1 - x0;
+      if (slot >= 4) {
+        const w = Math.min(24, slot - 2);
+        x0 = x0 + (slot - w) / 2;
+        x1 = x0 + w;
+      } else x1 = Math.max(x1, x0 + 1);
+      const aH = sc(Math.min(clamp, d.adds[this.hoverBin]));
+      const dH = sc(Math.min(clamp, d.dels[this.hoverBin]));
+      p.strokeRect(x0 - 1.5, base - aH - 1.5, x1 - x0 + 3, aH + dH + 4, pal.ink, 1, 0.6);
+    }
+    this.strip.drawSelection(p, m.top, plotBottom);
+    this.strip.drawCursor(p, m.top - 4, plotBottom);
+  }
+
+  protected drawStatic(p: Painter) {
     const pal = palette();
     const m = this.strip.m;
     this.strip.update(this.width);
@@ -197,23 +231,19 @@ export class BarsView extends View {
       }
       const w = x1 - x0;
       const r = w >= 6 ? 4 : 0;
-      const hov = i === this.hoverBin;
       const aH = sc(Math.min(clamp, d.adds[i]));
       const dH = sc(Math.min(clamp, d.dels[i]));
-      const alpha = hov ? 1 : 0.9;
+      const alpha = 0.9;
       if (aH > 0) p.roundRect(x0, base - aH, w, aH, [r, r, 0, 0], pal.add, alpha);
       if (dH > 0) p.roundRect(x0, base + 1, w, dH, [0, 0, r, r], pal.del, alpha);
       // Clipped outliers get a marker at the cut, the true value lives in the tooltip.
       if (d.adds[i] > clamp) this.clipMark(p, (x0 + x1) / 2, base - aH - 4, true);
       if (d.dels[i] > clamp) this.clipMark(p, (x0 + x1) / 2, base + dH + 5, false);
-      if (hov) p.strokeRect(x0 - 1.5, base - aH - 1.5, w + 3, aH + dH + 4, pal.ink, 1, 0.6);
     }
     p.restore();
     p.line(m.left, base + 0.5, m.left + this.strip.plotW, base + 0.5, pal.axis, 1);
     if (matchSet) this.strip.drawSearch(p, plotBottom - 5);
     this.strip.drawTags(p, m.top - 4);
-    this.strip.drawSelection(p, m.top, plotBottom);
-    this.strip.drawCursor(p, m.top - 4, plotBottom);
     this.strip.drawXAxis(p, this.height);
   }
 

@@ -83,10 +83,13 @@ export class FileTree {
   lastTouchedStep = -1;
   /** Recent renames, new path -> old path (so layouts can move a node instead of re-creating it). */
   readonly renames = new Map<string, string>();
+  /** Recently touched files, newest last (activity rings without scanning every file). */
+  recent: number[] = [];
 
   constructor(readonly paths: Paths) {}
 
   clear() {
+    this.recent = [];
     this.root = new TNode("", "", null, true, 0);
     this.files.clear();
     this.leaves.clear();
@@ -183,7 +186,10 @@ export class FileTree {
         this.lastTouched = [];
         this.lastTouchedStep = ev.step[i];
       }
-      if (k !== 4) this.lastTouched.push(pid);
+      if (k !== 4) {
+        this.lastTouched.push(pid);
+        this.recent.push(pid);
+      }
       if (k === 3 && ev.oldPath[i] >= 0) {
         if (this.renames.size > 2000) this.renames.clear();
         this.renames.set(this.paths.path[pid], this.paths.path[ev.oldPath[i]]);
@@ -198,7 +204,12 @@ export class FileTree {
         });
       }
     }
+    if (this.recent.length > 4000) this.recent = this.recent.slice(-2000);
     return i;
+  }
+
+  leaf(pathId: number): TNode | undefined {
+    return this.leaves.get(pathId);
   }
 
   /** Node for a directory path ("" = root), or null if it has no live files. */

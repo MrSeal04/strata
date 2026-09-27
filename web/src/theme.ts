@@ -25,6 +25,12 @@ export interface Palette {
 }
 
 let current: Palette | null = null;
+let version = 0;
+
+/** Bumped whenever the resolved palette changes (cache keys for rendered layers). */
+export function paletteVersion(): number {
+  return version;
+}
 const listeners = new Set<() => void>();
 
 function read(): Palette {
@@ -67,6 +73,7 @@ export function onPaletteChange(fn: () => void): () => void {
 
 function refresh() {
   current = read();
+  version++;
   listeners.forEach((fn) => fn());
 }
 

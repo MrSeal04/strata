@@ -1,7 +1,7 @@
 import { clock } from "../clock";
 import { CanvasPainter } from "../paint/canvas";
 import type { Painter } from "../paint/painter";
-import { palette } from "../theme";
+import { palette, paletteVersion } from "../theme";
 import { h } from "../ui/dom";
 import { tooltip } from "../ui/tooltip";
 
@@ -88,16 +88,46 @@ export abstract class View {
     const ctx = this.canvas.getContext("2d");
     if (!ctx) return;
     const p = new CanvasPainter(ctx, this.width, this.height, dpr);
-    if (this.transparentBackground()) ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    else p.clear(palette().surface);
+    const key = this.staticKey();
     this.onScreen = true;
     try {
-      this.draw(p);
+      if (key === null) {
+        if (this.transparentBackground()) ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        else p.clear(palette().surface);
+        this.draw(p);
+      } else {
+        // Split view: the static layer is re-rendered only when its inputs change; each frame
+        // just blits it and paints the overlay (cursor, hover, selection).
+        const full = `${key}|${this.canvas.width}x${this.canvas.height}|${paletteVersion()}`;
+        if (this.layer?.key !== full) {
+          const off = new OffscreenCanvas(this.canvas.width, this.canvas.height);
+          const lp = new CanvasPainter(off.getContext("2d")!, this.width, this.height, dpr);
+          lp.clear(palette().surface);
+          this.drawStatic(lp);
+          this.layer = { key: full, canvas: off };
+        }
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(this.layer.canvas, 0, 0);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        this.drawOverlay(p);
+      }
     } finally {
       this.onScreen = false;
     }
     if (this.animating()) this.invalidate();
   }
+
+  private layer: { key: string; canvas: OffscreenCanvas } | null = null;
+
+  /** Views split into a cached static layer and a cheap overlay return a key for the static
+   *  layer's inputs here (null = no split: `draw` paints everything every frame). */
+  protected staticKey(): string | null {
+    return null;
+  }
+
+  protected drawStatic(_p: Painter) {}
+
+  protected drawOverlay(_p: Painter) {}
 
   /** A view that paints part of itself on a layer underneath keeps its 2D canvas transparent. */
   protected transparentBackground(): boolean {

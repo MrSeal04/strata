@@ -299,6 +299,31 @@ export class AreaView extends View {
   }
 
   draw(p: Painter) {
+    this.drawStatic(p);
+    this.drawOverlay(p);
+  }
+
+  protected staticKey(): string | null {
+    const s = this.app.store.get();
+    return `${this.data?.key}|${this.isolated}|${s.search?.q}|${s.search?.steps.length}|${this.width}x${this.height}`;
+  }
+
+  protected drawOverlay(p: Painter) {
+    const pal = palette();
+    const m = this.strip.m;
+    const bottomY = this.height - m.bottom;
+    this.strip.update(this.width);
+    const d = this.data;
+    if (d && this.hoverBin >= 0 && this.hoverBin >= d.firstBin && this.hoverBin <= d.lastBin) {
+      const w = (d.hi - d.lo) / d.bins;
+      const x = this.strip.px(d.lo + (this.hoverBin + 0.5) * w);
+      p.line(x, m.top, x, bottomY, pal.inkMuted, 1);
+    }
+    this.strip.drawSelection(p, m.top, bottomY);
+    this.strip.drawCursor(p, m.top - 4, bottomY);
+  }
+
+  protected drawStatic(p: Painter) {
     const pal = palette();
     const m = this.strip.m;
     this.strip.update(this.width);
@@ -344,15 +369,8 @@ export class AreaView extends View {
       }
     });
     p.restore();
-    // hover crosshair
-    if (this.hoverBin >= 0 && this.hoverBin >= d.firstBin && this.hoverBin <= d.lastBin) {
-      const x = this.strip.px(d.lo + (this.hoverBin + 0.5) * w);
-      p.line(x, m.top, x, bottomY, pal.inkMuted, 1);
-    }
     this.strip.drawSearch(p, bottomY - 5);
     this.strip.drawTags(p, m.top - 4);
-    this.strip.drawSelection(p, m.top, bottomY);
-    this.strip.drawCursor(p, m.top - 4, bottomY);
     this.strip.drawXAxis(p, this.height);
   }
 
