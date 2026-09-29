@@ -352,6 +352,21 @@ async fn repo_events(
     ))
 }
 
+async fn repo_churn(
+    State(st): State<Shared>,
+    Path(repo): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Response> {
+    let (f, from, to) = (
+        filters(&q),
+        num_param::<i64>(&q, "from")?,
+        num_param::<u32>(&q, "to")?,
+    );
+    Ok(arrow(
+        blocking(move || st.db.churn(&repo, from, to, &f)).await?,
+    ))
+}
+
 async fn repo_compare(
     State(st): State<Shared>,
     Path(repo): Path<String>,
@@ -477,6 +492,7 @@ pub fn router(state: Shared) -> Router {
         .route("/r/{repo}/state", get(repo_state))
         .route("/r/{repo}/events", get(repo_events))
         .route("/r/{repo}/compare", get(repo_compare))
+        .route("/r/{repo}/churn", get(repo_churn))
         .route("/r/{repo}/step/{n}", get(repo_step))
         .route("/r/{repo}/commits", get(repo_commits))
         .route("/r/{repo}/search", get(repo_search))

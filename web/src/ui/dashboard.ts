@@ -2,6 +2,7 @@ import { type Author, api, boolCol, col, filterParams, strCol } from "../api/cli
 import type { App } from "../app";
 import { openExportMenu } from "../export/menu";
 import { colorMaps } from "../model/colors";
+import { ChurnTree } from "../model/churn";
 import { CompareCache } from "../model/compare";
 import { Composition } from "../model/composition";
 import { FileTree, Paths } from "../model/filetree";
@@ -63,6 +64,7 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
     openCommit: (step) => void openCommit(app, step),
     compare: new CompareCache(store, repo, paths),
     composition: null as unknown as Composition,
+    churn: null as unknown as ChurnTree,
     exportRate: null,
     stepsPerSecond: () => {
       if (app.exportRate) return app.exportRate;
@@ -71,7 +73,9 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
       return (b - a + 1) / Math.max(0.1, runDuration(s.settings, tl, a, b));
     },
   };
+  app.churn = new ChurnTree(app);
   app.composition = new Composition(app);
+  sync.addLayer(app.churn);
   sync.addLayer(app.composition);
   // Author color slots go to the authors with the most surviving lines, the ones the area chart
   // and the treemap's bands label (ranked by commits until that answer arrives, or if it fails).
@@ -110,7 +114,9 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
   const unsubs = [
     store.watch((s) => s.filterRev, () => sync.reset()),
     // Bands follow what's shown, the range and the filters (their keys come from /keys).
-    store.watch((s) => [s.settings.colorBy, !!s.compare, s.brush, s.settings.axis, s.filterRev, s.settings.cohortUnit, s.settings.hideBots, s.settings.exclude], () => app.composition.update(), true),
+    store.watch((s) => [s.settings.colorBy, !!s.compare, s.brush, s.settings.axis, s.filterRev, s.settings.cohortUnit, s.settings.hideBots, s.settings.exclude, s.settings.treemapMeasure], () => app.composition.update(), true),
+    // The churn view turns on and off, or its window moves, with the measure, compare and brush.
+    store.watch((s) => [s.settings.treemapMeasure, !!s.compare, s.brush?.[0]], () => sync.refresh()),
     // Directory keys are relative to the root at a depth: a new root or depth is a new key space.
     store.watch((s) => [s.root, s.settings.areaDepth], () => colorMaps.dir.reset()),
     store.watch((s) => s.cursor, (c) => void sync.goto(c)),

@@ -28,6 +28,9 @@ export class Composition implements SyncLayer {
   private loadedSlice: BandSlice | null = null;
   /** Keys and slice being loaded (they become `keys` with the snapshot that uses them). */
   private next: Key[] = [];
+  /** Size (surviving lines) or flow (lines changed after `window`, the churn view). */
+  private mode: "size" | "flow" = "size";
+  private window = -1;
   private slice: BandSlice | null = null;
   /** Parameters the keys were fetched for ("" = none yet). */
   private keysFor = "";
@@ -63,7 +66,13 @@ export class Composition implements SyncLayer {
     p.set("hi", String(hi));
     p.set("bins", "1");
     p.set("top", "8");
+    p.set("mode", this.measure());
     return p;
+  }
+
+  /** The churn view breaks down lines changed instead of surviving lines. */
+  private measure(): "size" | "flow" {
+    return this.app.store.get().settings.treemapMeasure === "churn" ? "flow" : "size";
   }
 
   /** Fetch the keys for what's shown now; the sync layer turns on once they're here. */
@@ -77,7 +86,9 @@ export class Composition implements SyncLayer {
       return;
     }
     const p = this.keyParams(slice);
-    const want = `${slice}|${p}`;
+    const mode = this.measure();
+    const window = mode === "flow" ? this.app.churn.from() : -1;
+    const want = `${slice}|${window}|${p}`;
     if (want === this.keysFor && this.slice === slice) return;
     if (want === this.fetching) return;
     this.fetching = want;
@@ -87,6 +98,8 @@ export class Composition implements SyncLayer {
       const raw = strCol(t, "key");
       const labels = strCol(t, "label");
       this.next = raw.map((k, i) => ({ key: Number(k), label: labels[i] }));
+      this.mode = mode;
+      this.window = window;
       if (slice === "author") colorMaps.author.assign(this.next.map((k) => k.label));
       this.slice = slice;
       this.keysFor = want;
@@ -107,16 +120,18 @@ export class Composition implements SyncLayer {
     p.set("slice", this.slice ?? "author");
     p.set("unit", cohortUnit(this.app));
     p.set("keys", this.next.map((k) => k.key).join(","));
+    p.set("mode", this.mode);
     for (const [k, v] of Object.entries(extra)) p.set(k, String(v));
     return p;
   }
 
   snapshot(step: number): Promise<Table> {
-    return api.composition(this.app.repo, this.params({ to: step }));
+    return api.composition(this.app.repo, this.params({ from: this.window, to: step }));
   }
 
   chunk(from: number, to: number): Promise<Table> {
-    return api.origins(this.app.repo, this.params({ from, to }));
+    // (lines changed only count inside the churn window)
+    return api.origins(this.app.repo, this.params({ from: Math.max(from, this.window), to }));
   }
 
   load(data: unknown) {

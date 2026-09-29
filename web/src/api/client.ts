@@ -145,6 +145,8 @@ export const api = {
   state: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/state?${p}`, signal),
   events: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/events?${p}`, signal),
   compare: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/compare?${p}`, signal),
+  /** Lines added / deleted per file over (from, to]. */
+  churn: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/churn?${p}`, signal),
   /** The keys an area query labels, best first (key, label). */
   keys: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/keys?${p}`, signal),
   /** Per file and tracked key: surviving lines (size) or lines changed (flow). */

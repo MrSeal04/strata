@@ -56,6 +56,7 @@ export class TreemapView extends View {
   private modeSel: HTMLSelectElement;
   private showSel: HTMLSelectElement;
   private extraSel: HTMLSelectElement;
+  private measureSel: HTMLSelectElement;
   /** WebGL layer for the rect fills of large treemaps (null without WebGL2). */
   private gl: GlRects | null = null;
   private glActive = false;
@@ -107,8 +108,12 @@ export class TreemapView extends View {
       this.zoomBtn.style.display = this.zoom.zoomed ? "" : "none";
       this.invalidate();
     };
+    // Size: lines now. Churn: lines added + deleted from the range start to the cursor.
+    this.measureSel = h("select", { "aria-label": "Square size" }, h("option", { value: "size", text: "sized by lines" }), h("option", { value: "churn", text: "sized by lines changed" }));
+    this.measureSel.addEventListener("change", () => app.store.setSettings({ treemapMeasure: this.measureSel.value as "size" | "churn" }));
     this.addControl(this.showSel);
     this.addControl(this.extraSel);
+    this.addControl(this.measureSel);
     this.addControl(this.modeSel);
     this.addControl(this.zoomBtn);
     // A new root fills the card; compare lays out its own panes (no zoom there).
@@ -133,7 +138,7 @@ export class TreemapView extends View {
       legend();
       this.invalidate();
     });
-    app.store.watch((s) => [s.root, s.compare, s.filterRev, s.settings.colorBy, s.settings.areaDepth, s.settings.cohortUnit], () => {
+    app.store.watch((s) => [s.root, s.compare, s.filterRev, s.settings.colorBy, s.settings.areaDepth, s.settings.cohortUnit, s.settings.treemapMeasure, s.brush?.[0]], () => {
       this.layoutKey = "";
       this.updateTitle();
       this.invalidate();
@@ -148,9 +153,15 @@ export class TreemapView extends View {
     const s = this.app.store.get();
     const st = s.settings;
     const t = this.head.querySelector("h2")!;
+    const churn = st.treemapMeasure === "churn";
+    const from = this.app.churn.from() + 1;
     t.textContent = s.compare
       ? `Files: #${fmt.int(s.compare.a + 1)} → #${fmt.int(s.compare.b + 1)}`
-      : `Files by size${s.root ? ` · ${s.root}/` : ""}`;
+      : churn
+        ? `Lines changed from #${fmt.int(from + 1)}${s.root ? ` · ${s.root}/` : ""}`
+        : `Files by size${s.root ? ` · ${s.root}/` : ""}`;
+    this.measureSel.style.display = s.compare ? "none" : "";
+    this.measureSel.value = st.treemapMeasure;
     this.modeSel.style.display = s.compare ? "" : "none";
     if (s.compare) this.modeSel.value = s.compare.mode;
     // Compare colors by growth, so the slice controls step aside.
@@ -182,6 +193,7 @@ export class TreemapView extends View {
       }
       return [{ key: "B", label: null, tree: d.treeB, x: 0, w: W }];
     }
+    if (s.settings.treemapMeasure === "churn") return [{ key: "C", label: null, tree: this.app.churn.tree, x: 0, w: W }];
     return [{ key: "L", label: null, tree: this.app.tree, x: 0, w: W }];
   }
 
@@ -328,7 +340,8 @@ export class TreemapView extends View {
     const z = this.zoom;
     const zk = z.k;
     if (!this.panes.some((q) => q.nodes.length)) {
-      const msg = s.compare && !this.app.compare.data ? "Loading comparison…" : this.app.tree.step < 0 ? "Loading…" : "No files at this point";
+      const churn = !s.compare && s.settings.treemapMeasure === "churn";
+      const msg = s.compare && !this.app.compare.data ? "Loading comparison…" : this.app.tree.step < 0 ? "Loading…" : churn ? "No lines changed yet in this range" : "No files at this point";
       p.text(msg, this.width / 2, this.height / 2, { color: pal.inkMuted, size: 12, align: "center" });
       return;
     }
@@ -542,7 +555,12 @@ export class TreemapView extends View {
       box.append(h("div", { class: "sub", text: a === 0 ? "new since A" : b === 0 ? "deleted by B" : lang }));
       return box;
     }
-    box.append(tipRow(colorMaps.lang.color(lang), fmt.int(f.lines), `lines · ${lang}`));
+    if (f.adds !== undefined) {
+      // Churn view: what changed in the window, and whether the file is still there.
+      const live = this.app.tree.files.get(f.pathId);
+      box.append(tipRow(palette().add, `+${fmt.int(f.adds)}`, "lines added"), tipRow(palette().del, `−${fmt.int(f.dels ?? 0)}`, "lines deleted"));
+      box.append(tipRow(null, live ? fmt.int(live.lines) : "deleted", live ? `lines now · ${lang}` : `by #${fmt.int(this.app.store.get().cursor + 1)}`));
+    } else box.append(tipRow(colorMaps.lang.color(lang), fmt.int(f.lines), `lines · ${lang}`));
     const colorBy = this.app.store.get().settings.colorBy;
     const comp = this.app.composition;
     const pairs = (colorBy === "author" || colorBy === "cohort") && comp.ready(colorBy) ? comp.of(f.pathId) : undefined;

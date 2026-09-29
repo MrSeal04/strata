@@ -225,6 +225,53 @@ fn state_rows(bytes: &[u8]) -> Vec<(u32, i64, i64)> {
     rows
 }
 
+/// A numstat path's new name: `{a => b}/x` -> `b/x`, `a/{x => y}` -> `a/y`, `x => y` -> `y`.
+fn numstat_new_path(p: &str) -> String {
+    if let (Some(l), Some(r)) = (p.find('{'), p.find('}')) {
+        let inner = &p[l + 1..r];
+        let new = inner.split(" => ").nth(1).unwrap_or(inner);
+        let joined = format!("{}{}{}", &p[..l], new, &p[r + 1..]);
+        return joined
+            .replace("//", "/")
+            .trim_start_matches('/')
+            .to_string();
+    }
+    p.split_once(" => ").map_or(p, |(_, new)| new).to_string()
+}
+
+/// A commit's sha and the (path, adds, dels) of each text file it changed.
+type CommitNumstat = (String, Vec<(String, i64, i64)>);
+
+/// Per first-parent commit: the text files it changed, with their numstat.
+fn git_numstat_paths(repo: &Path, ws: bool) -> Vec<CommitNumstat> {
+    let mut args = vec![
+        "log",
+        "--first-parent",
+        "-M",
+        "--diff-algorithm=histogram",
+        "--numstat",
+        "--format=@%H",
+        "--reverse",
+    ];
+    if ws {
+        args.push("-w");
+    }
+    let mut out: Vec<CommitNumstat> = Vec::new();
+    for line in git(repo, &args).lines() {
+        if let Some(sha) = line.strip_prefix('@') {
+            out.push((sha.to_string(), Vec::new()));
+        } else if let [a, d, path] = line.splitn(3, '\t').collect::<Vec<_>>()[..]
+            && let (Ok(a), Ok(d)) = (a.parse::<i64>(), d.parse::<i64>())
+        {
+            out.last_mut()
+                .unwrap()
+                .1
+                .push((numstat_new_path(path), a, d));
+        }
+    }
+    out
+}
+
 fn extract(layout: &Layout, repo: &Path) -> String {
     let src = Source::parse(repo.to_str().unwrap()).unwrap();
     let opts = ExtractOptions {
@@ -640,7 +687,45 @@ fn check_repo(name: &str) {
         );
     }
 
-    // 7. The query endpoints run.
+    // 7. Churn (the treemap's lines-changed view): per file over a window, adds and deletes
+    //    equal git's numstat summed over those commits (strict and -w), deleted files included.
+    for ws in [false, true] {
+        let per_step = git_numstat_paths(&repo, ws);
+        for from in [-1i64, i64::from(last_step / 2)] {
+            let mut want: HashMap<String, (i64, i64)> = HashMap::new();
+            for (sha, files) in &per_step {
+                if i64::from(shas[sha]) <= from {
+                    continue;
+                }
+                for (path, a, d) in files {
+                    if gitlinks.contains(path) {
+                        continue;
+                    }
+                    let e = want.entry(path.clone()).or_insert((0, 0));
+                    e.0 += a;
+                    e.1 += d;
+                }
+            }
+            want.retain(|_, (a, d)| *a + *d > 0);
+            let f = Filters {
+                ws,
+                ..Default::default()
+            };
+            let got: HashMap<String, (i64, i64)> = int_rows(
+                &db.churn(&id, from, last_step, &f).unwrap(),
+                &["path_id", "adds", "dels"],
+            )
+            .into_iter()
+            .map(|r| (paths[&(r[0] as u32)].clone(), (r[1], r[2])))
+            .collect();
+            assert_eq!(
+                got, want,
+                "{name}: churn per file after step {from} (ws={ws})"
+            );
+        }
+    }
+
+    // 8. The query endpoints run.
     let f = Filters {
         exclude: vec![4, 5, 6, 7],
         ..Default::default()

@@ -965,6 +965,20 @@ impl Db {
         })
     }
 
+    /// Lines added and deleted per file over `(from, to]` (text files; deleted files included),
+    /// with the last step that changed it: the treemap's churn view.
+    pub fn churn(&self, repo: &str, from: i64, to: u32, f: &Filters) -> anyhow::Result<Vec<u8>> {
+        self.with(repo, |c, s| {
+            self.ipc_cached(c, &format!(
+                "SELECT c.path_id, sum(c.{a})::INTEGER AS adds, sum(c.{d})::INTEGER AS dels, max(c.step)::INTEGER AS last_step
+                 FROM {s}.changes c JOIN {s}.paths p USING (path_id)
+                 WHERE c.step > {from} AND c.step <= {to} AND NOT c.is_binary AND {pp}
+                 GROUP BY c.path_id HAVING sum(c.{a}) + sum(c.{d}) > 0",
+                a = f.adds(), d = f.dels(), pp = f.path_pred(),
+            ))
+        })
+    }
+
     /// Per-path lines at two steps.
     pub fn compare(&self, repo: &str, a: u32, b: u32, f: &Filters) -> anyhow::Result<Vec<u8>> {
         self.with(repo, |c, s| {

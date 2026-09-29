@@ -17,6 +17,8 @@ export interface SyncLayer {
   load(data: unknown, step: number): void;
   /** Apply chunk rows from index `ptr` whose step <= `upto`; returns the next row index. */
   apply(data: unknown, ptr: number, upto: number): number;
+  /** Optional: the /events rows [from, to) just applied to the tree (layers built from them). */
+  events?(ev: DecodedEvents, from: number, to: number): void;
   clear(): void;
 }
 
@@ -168,7 +170,12 @@ export class StateSync {
         if (gen !== this.gen) return;
       }
       const ev = chunk.ev!;
+      const p0 = chunk.ptr;
       chunk.ptr = t.applyEvents(ev, chunk.ptr, target);
+      for (const l of this.layers) {
+        const key = this.loaded.get(l);
+        if (l.events && key && key === l.key()) l.events(ev, p0, chunk.ptr);
+      }
       for (const [l, x] of chunk.extras) {
         if (x.key === this.loaded.get(l)) x.ptr = l.apply(x.data, x.ptr, target);
       }

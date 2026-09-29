@@ -44,6 +44,9 @@ export interface FileRec {
   edited: number;
   lastAdds: number;
   lastDels: number;
+  /** Churn view: lines added and deleted over its window. */
+  adds?: number;
+  dels?: number;
 }
 
 export class TNode {

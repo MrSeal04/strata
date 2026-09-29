@@ -1,4 +1,5 @@
 import type { Author, RepoMeta, Summary } from "./api/client";
+import type { ChurnTree } from "./model/churn";
 import type { CompareCache } from "./model/compare";
 import type { Composition } from "./model/composition";
 import type { FileTree, Paths } from "./model/filetree";
@@ -26,6 +27,8 @@ export interface App {
   compare: CompareCache;
   /** Per-file lines by author or cohort (the treemap's bands), kept in sync with `tree`. */
   composition: Composition;
+  /** Files changed from the range start to the cursor (the treemap's churn view). */
+  churn: ChurnTree;
   /** Set by the video exporter so heat decays at the video's pace. */
   exportRate: number | null;
 }

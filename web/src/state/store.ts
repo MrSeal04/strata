@@ -28,6 +28,8 @@ export interface Settings {
   cohortUnit: "auto" | "year" | "quarter" | "month";
   treeLayout: TreeLayout;
   colorBy: ColorBy;
+  /** Treemap square size: current lines, or lines added + deleted from the range start to the cursor. */
+  treemapMeasure: "size" | "churn";
   actors: boolean;
   gravatar: boolean;
   nodeBudget: number;
@@ -55,6 +57,7 @@ export const DEFAULT_SETTINGS: Settings = {
   cohortUnit: "auto",
   treeLayout: "force",
   colorBy: "lang",
+  treemapMeasure: "size",
   actors: false,
   gravatar: false,
   nodeBudget: 6000,
