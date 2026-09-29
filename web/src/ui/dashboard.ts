@@ -114,7 +114,7 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
   const unsubs = [
     store.watch((s) => s.filterRev, () => sync.reset()),
     // Bands follow what's shown, the range and the filters (their keys come from /keys).
-    store.watch((s) => [s.settings.colorBy, !!s.compare, s.brush, s.settings.axis, s.filterRev, s.settings.cohortUnit, s.settings.hideBots, s.settings.exclude, s.settings.treemapMeasure], () => app.composition.update(), true),
+    store.watch((s) => [s.settings.colorBy, s.settings.treeColorBy, !!s.compare, s.brush, s.settings.axis, s.filterRev, s.settings.cohortUnit, s.settings.hideBots, s.settings.exclude, s.settings.treemapMeasure], () => app.composition.update(), true),
     // The churn view turns on and off, or its window moves, with the measure, compare and brush.
     store.watch((s) => [s.settings.treemapMeasure, !!s.compare, s.brush?.[0]], () => sync.refresh()),
     // Directory keys are relative to the root at a depth: a new root or depth is a new key space.

@@ -46,11 +46,13 @@ export class Composition implements SyncLayer {
     this.listeners.add(fn);
   }
 
-  /** The slice shown, if the tree and treemap need bands for it. */
+  /** The slice shown, if the treemap (which draws the bands) or else the tree needs it. With the
+   *  cards unlinked on different slices, the tree colors by each file's own top author or age. */
   private wanted(): BandSlice | null {
     const s = this.app.store.get();
     if (s.compare) return null;
-    return s.settings.colorBy === "author" || s.settings.colorBy === "cohort" ? s.settings.colorBy : null;
+    for (const by of [s.settings.colorBy, s.settings.treeColorBy]) if (by === "author" || by === "cohort") return by;
+    return null;
   }
 
   /** The area query these keys match: slice, unit and the brushed range on the chart's axis. */

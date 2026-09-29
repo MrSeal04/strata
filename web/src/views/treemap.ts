@@ -3,12 +3,12 @@ import type { App } from "../app";
 import { clock } from "../clock";
 import { colorMaps, inkOn } from "../model/colors";
 import type { FileTree, TNode } from "../model/filetree";
-import { COLOR_BY_LABEL, assignDirColors, cohortUnit, fileColor, growthColor, heat, heatColor, heatSpan } from "../model/slices";
+import { assignDirColors, cohortUnit, fileColor, growthColor, heat, heatColor, heatSpan } from "../model/slices";
 import { SteadyLayout, layoutTree, livePadding } from "../model/steady";
 import { GlRects } from "../paint/glrects";
 import type { Painter } from "../paint/painter";
-import type { ColorBy } from "../state/store";
 import { palette } from "../theme";
+import { colorControls } from "../ui/controls";
 import { fmt, h, icon } from "../ui/dom";
 import { tipRow, tooltip } from "../ui/tooltip";
 import { renderColorLegend } from "./colorlegend";
@@ -55,8 +55,6 @@ export class TreemapView extends View {
   private moving = false;
   private lastFrame = 0;
   private modeSel: HTMLSelectElement;
-  private showSel: HTMLSelectElement;
-  private extraSel: HTMLSelectElement;
   private measureSel: HTMLSelectElement;
   private layoutSel: HTMLSelectElement;
   /** Steady layout: files keep their end-of-range places while playing. */
@@ -94,15 +92,6 @@ export class TreemapView extends View {
       const c = app.store.get().compare;
       if (c) app.store.set({ compare: { ...c, mode: this.modeSel.value as "overlay" | "side" } });
     });
-    // What the squares show: the area chart's slices plus activity, with the slice's granularity.
-    this.showSel = h("select", { "aria-label": "Show" }, ...(Object.keys(COLOR_BY_LABEL) as ColorBy[]).map((k) => h("option", { value: k, text: `by ${COLOR_BY_LABEL[k]}` })));
-    this.showSel.addEventListener("change", () => app.store.setSettings({ colorBy: this.showSel.value as ColorBy }));
-    this.extraSel = h("select", { "aria-label": "Granularity" });
-    this.extraSel.addEventListener("change", () => {
-      const v = this.extraSel.value;
-      if (app.store.get().settings.colorBy === "cohort") app.store.setSettings({ cohortUnit: v as "auto" | "year" | "quarter" | "month" });
-      else app.store.setSettings({ areaDepth: Number(v) });
-    });
     this.zoomBtn = h("button", { class: "btn icon", title: "Reset zoom", "aria-label": "Reset zoom" }, icon("fit"));
     this.zoomBtn.addEventListener("click", () => this.zoom.reset());
     this.zoomBtn.style.display = "none";
@@ -124,8 +113,11 @@ export class TreemapView extends View {
       this.updateTitle();
       this.invalidate();
     };
-    this.addControl(this.showSel);
-    this.addControl(this.extraSel);
+    // What the squares show: the area chart's slices plus activity, with the slice's granularity.
+    const color = colorControls(app, "colorBy", "tree");
+    this.addControl(color.show);
+    this.addControl(color.extra);
+    this.addControl(color.glow);
     this.addControl(this.measureSel);
     this.addControl(this.layoutSel);
     app.store.watch((s) => [s.settings.treemapLayout, !!s.compare, s.brush, s.settings.treemapMeasure, s.filterRev, s.steps], () => {
@@ -141,7 +133,7 @@ export class TreemapView extends View {
       this.zoom.reset();
     }, true);
     app.store.watch((s) => [s.cursor, s.settings.colorBy, s.search?.paths.size, s.settings.theme, s.settings.diffColors, s.settings.areaDepth, s.settings.cohortUnit], () => this.invalidate());
-    const legend = () => renderColorLegend(app, this.legend);
+    const legend = () => renderColorLegend(app, this.legend, app.store.get().settings.colorBy);
     // (the last-edited scale stretches with the history's age at the cursor)
     const spanKey = (s: { settings: { colorBy: string } }) => (s.settings.colorBy === "edited" ? Math.round(Math.log(heatSpan(app)) * 8) : 0);
     app.store.watch((s) => [s.settings.colorBy, s.compare, s.langs, s.authors, s.root, s.settings.areaDepth, s.settings.cohortUnit, s.settings.theme, s.settings.diffColors, spanKey(s)], legend, true);
@@ -192,18 +184,6 @@ export class TreemapView extends View {
     }
     this.modeSel.style.display = s.compare ? "" : "none";
     if (s.compare) this.modeSel.value = s.compare.mode;
-    // Compare colors by growth, so the slice controls step aside.
-    this.showSel.style.display = s.compare ? "none" : "";
-    this.showSel.value = st.colorBy;
-    const opts: [string, string][] =
-      st.colorBy === "cohort"
-        ? [["auto", `auto (${cohortUnit(this.app)})`], ["year", "per year"], ["quarter", "per quarter"], ["month", "per month"]]
-        : st.colorBy === "dir"
-          ? Array.from({ length: Math.max(3, st.areaDepth) }, (_, i): [string, string] => [String(i + 1), `depth ${i + 1}`])
-          : [];
-    this.extraSel.replaceChildren(...opts.map(([v, text]) => h("option", { value: v, text })));
-    this.extraSel.style.display = opts.length && !s.compare ? "" : "none";
-    this.extraSel.value = st.colorBy === "cohort" ? st.cohortUnit : String(st.areaDepth);
   }
 
   /** Which trees to lay out, and where. */

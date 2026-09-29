@@ -2,11 +2,12 @@ import { type HierarchyNode, type HierarchyRectangularNode, hierarchy, partition
 import type { App } from "../app";
 import { colorMaps } from "../model/colors";
 import { TNode, stableChildren } from "../model/filetree";
-import { fileColor, heat, heatSpan } from "../model/slices";
+import { assignDirColors, fileColor, heat, heatSpan } from "../model/slices";
 import { CanvasPainter } from "../paint/canvas";
 import type { Painter } from "../paint/painter";
 import type { TreeLayout } from "../state/store";
 import { palette } from "../theme";
+import { colorControls, settingSelect, settingToggle } from "../ui/controls";
 import { fmt, h, icon } from "../ui/dom";
 import { tipRow, tooltip } from "../ui/tooltip";
 import { clock } from "../clock";
@@ -122,8 +123,37 @@ export class TreeView extends View {
       this.zoomBtn.style.display = this.zoom.zoomed ? "" : "none";
       this.invalidate();
     };
+    const color = colorControls(app, "treeColorBy", "treemap");
+    const nodes = settingSelect(app.store, "nodeBudget", [1000, 3000, 6000, 12_000, 25_000, 50_000].map((n) => [n, `${fmt.int(n)} nodes`]), {
+      label: "Node budget",
+      title: "Most nodes the tree shows; deeper folders collapse above it",
+      custom: (n) => `${fmt.int(n)} nodes`,
+    });
+    const actors = settingToggle(app.store, "actors", "Actors", "Gource-style: authors fly to the files they touch");
+    const avatars = settingToggle(app.store, "gravatar", "Avatars", "Show authors' pictures, loaded from gravatar.com using a SHA-256 hash of each email");
     this.addControl(this.layoutSel);
+    this.addControl(color.show);
+    this.addControl(color.extra);
+    this.addControl(color.glow);
+    this.addControl(nodes);
+    this.addControl(actors);
+    this.addControl(avatars);
     this.addControl(this.zoomBtn);
+    // Actors fly only over the node layouts; avatars only mean something with actors on.
+    app.store.watch((s) => [s.settings.treeLayout, s.settings.actors], () => {
+      const st = app.store.get().settings;
+      const nodeLayout = st.treeLayout === "radial" || st.treeLayout === "force";
+      actors.style.display = nodeLayout ? "" : "none";
+      avatars.style.display = nodeLayout && st.actors ? "" : "none";
+    }, true);
+    // Avatars follow the toggle for authors already on screen too.
+    app.store.watch((s) => s.settings.gravatar, (on) => {
+      for (const a of this.actors.values()) {
+        if (!on) a.img = null;
+        else if (!a.img) void this.loadGravatar(a);
+      }
+      this.invalidate();
+    });
     // A new root or layout starts unzoomed.
     app.store.watch((s) => [s.root, s.settings.treeLayout], () => this.zoom.reset());
     app.store.watch((s) => [s.settings.treeLayout, s.settings.nodeBudget, s.root, s.filterRev], () => {
@@ -131,19 +161,19 @@ export class TreeView extends View {
       this.builtKey = "";
       this.invalidate();
     });
-    app.store.watch((s) => [s.cursor, s.settings.colorBy, s.search?.paths.size, s.settings.actors, s.settings.theme, s.settings.areaDepth, s.settings.cohortUnit], () => this.invalidate());
-    const legend = () => renderColorLegend(app, this.legend);
+    app.store.watch((s) => [s.cursor, s.settings.treeColorBy, s.search?.paths.size, s.settings.actors, s.settings.theme, s.settings.areaDepth, s.settings.cohortUnit], () => this.invalidate());
+    const legend = () => renderColorLegend(app, this.legend, app.store.get().settings.treeColorBy);
     // (the last-edited scale stretches with the history's age at the cursor)
-    const spanKey = (s: { settings: { colorBy: string } }) => (s.settings.colorBy === "edited" ? Math.round(Math.log(heatSpan(app)) * 8) : 0);
-    app.store.watch((s) => [s.settings.colorBy, s.compare, s.langs, s.authors, s.root, s.settings.areaDepth, s.settings.cohortUnit, s.settings.theme, s.settings.diffColors, spanKey(s)], legend, true);
-    // The treemap hands out directory colors as it lays out; repaint when it does.
+    const spanKey = (s: { settings: { treeColorBy: string } }) => (s.settings.treeColorBy === "edited" ? Math.round(Math.log(heatSpan(app)) * 8) : 0);
+    app.store.watch((s) => [s.settings.treeColorBy, s.compare, s.langs, s.authors, s.root, s.settings.areaDepth, s.settings.cohortUnit, s.settings.theme, s.settings.diffColors, spanKey(s)], legend, true);
+    // Directory colors are handed out by whichever card shows directories (see ensureDirColors).
     colorMaps.dir.onChange(() => {
-      if (app.store.get().settings.colorBy !== "dir") return;
+      if (app.store.get().settings.treeColorBy !== "dir") return;
       legend();
       this.invalidate();
     });
     colorMaps.author.onChange(() => {
-      if (app.store.get().settings.colorBy !== "author") return;
+      if (app.store.get().settings.treeColorBy !== "author") return;
       legend();
       this.invalidate();
     });
@@ -246,7 +276,26 @@ export class TreeView extends View {
     return root;
   }
 
+  /** Directory color slots handed out for the tree (root|depth|map version). */
+  private dirColorsFor = "";
+
+  /**
+   * The treemap and the area chart hand out directory colors when they show directories; with
+   * neither, the tree must, or its files stay gray. This runs at draw time because the dashboard
+   * clears the map on a new root or depth after every view's store watch has run.
+   */
+  private ensureDirColors() {
+    const s = this.app.store.get();
+    if (s.settings.treeColorBy !== "dir" || s.compare) return;
+    const key = () => `${s.root}|${s.settings.areaDepth}|${colorMaps.dir.version}`;
+    if (key() === this.dirColorsFor) return;
+    assignDirColors(this.app, this.app.tree.find(s.root) ?? this.app.tree.root);
+    this.dirColorsFor = key();
+  }
+
   private rebuild() {
+    // (new folders may have appeared: offer them the free slots)
+    this.dirColorsFor = "";
     const s = this.app.store.get();
     const tree = this.app.tree;
     const display = tree.find(s.root) ?? tree.root;
@@ -380,6 +429,7 @@ export class TreeView extends View {
       if (now - this.builtAt >= throttle) this.rebuild();
       else this.invalidate();
     }
+    this.ensureDirColors();
     if (!this.vroot || this.order.length <= 1) {
       p.text(tree.step < 0 ? "Loading…" : "No files at this point", this.width / 2, this.height / 2, { color: pal.inkMuted, size: 12, align: "center" });
       return;
@@ -426,7 +476,7 @@ export class TreeView extends View {
       for (const id of this.shown.keys()) if (!live.has(id)) this.shown.delete(id);
     }
     const searchPaths = s.search?.kind === "path" && s.search.paths.size ? s.search.paths : null;
-    const colorBy = s.settings.colorBy;
+    const colorBy = s.settings.treeColorBy;
     const pos = s.pos;
 
     // Geometry is in world units (the unzoomed card); everything is painted through the zoom.

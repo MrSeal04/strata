@@ -1,11 +1,12 @@
 import type { App } from "../app";
 import { colorMaps } from "../model/colors";
 import { bucketLabel, cohortColor, cohortRange, cohortUnit, heatColor, heatSpan } from "../model/slices";
+import type { ColorBy } from "../state/store";
 import { palette } from "../theme";
 import { fmt, h } from "../ui/dom";
 
-/** Legend for the tree/treemap color-by mode (identity is never color-alone). */
-export function renderColorLegend(app: App, el: HTMLElement) {
+/** Legend for a tree or treemap color-by mode (identity is never color-alone). */
+export function renderColorLegend(app: App, el: HTMLElement, colorBy: ColorBy) {
   const s = app.store.get();
   const pal = palette();
   const sw = (c: string) => {
@@ -32,7 +33,7 @@ export function renderColorLegend(app: App, el: HTMLElement) {
     el.replaceChildren(item(pal.add, "grew / new"), item(pal.divMid, "unchanged"), item(pal.del, "shrank"));
     return;
   }
-  switch (s.settings.colorBy) {
+  switch (colorBy) {
     case "lang": {
       const langs = app.summary.langs.map((l) => l.lang).filter((l) => colorMaps.lang.slot(l) >= 0).sort((a, b) => colorMaps.lang.slot(a) - colorMaps.lang.slot(b));
       el.replaceChildren(
@@ -49,7 +50,6 @@ export function renderColorLegend(app: App, el: HTMLElement) {
     }
     case "author":
     case "cohort": {
-      const colorBy = s.settings.colorBy;
       // Clicking an author filters to them, as in the area chart.
       const only = (name: string) => {
         const a = app.authors.find((x) => x.name === name);
