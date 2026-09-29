@@ -1,5 +1,6 @@
 import type { Author, RepoMeta, Summary } from "./api/client";
 import type { CompareCache } from "./model/compare";
+import type { Composition } from "./model/composition";
 import type { FileTree, Paths } from "./model/filetree";
 import type { StateSync } from "./model/sync";
 import type { Store } from "./state/store";
@@ -23,6 +24,8 @@ export interface App {
   /** Playback speed in steps per second for the current mode (for heat decay). */
   stepsPerSecond(): number;
   compare: CompareCache;
+  /** Per-file lines by author or cohort (the treemap's bands), kept in sync with `tree`. */
+  composition: Composition;
   /** Set by the video exporter so heat decays at the video's pace. */
   exportRate: number | null;
 }

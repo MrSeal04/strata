@@ -1,8 +1,9 @@
-import { type Author, api, boolCol, col } from "../api/client";
+import { type Author, api, boolCol, col, filterParams, strCol } from "../api/client";
 import type { App } from "../app";
 import { openExportMenu } from "../export/menu";
 import { colorMaps } from "../model/colors";
 import { CompareCache } from "../model/compare";
+import { Composition } from "../model/composition";
 import { FileTree, Paths } from "../model/filetree";
 import { StateSync } from "../model/sync";
 import { DEFAULT_SETTINGS, Store, initialState, loadSettings, saveSettings } from "../state/store";
@@ -61,6 +62,7 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
     authorName: (id) => byId.get(id)?.name ?? (id >= 0 ? `author ${id}` : "unknown"),
     openCommit: (step) => void openCommit(app, step),
     compare: new CompareCache(store, repo, paths),
+    composition: null as unknown as Composition,
     exportRate: null,
     stepsPerSecond: () => {
       if (app.exportRate) return app.exportRate;
@@ -69,8 +71,17 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
       return (b - a + 1) / Math.max(0.1, runDuration(s.settings, tl, a, b));
     },
   };
-  // Authors ranked by commits get the categorical slots (area/treemap/tree share them).
-  colorMaps.author.assign(authors.filter((a) => !a.is_bot).map((a) => a.name));
+  app.composition = new Composition(app);
+  sync.addLayer(app.composition);
+  // Author color slots go to the authors with the most surviving lines, the ones the area chart
+  // and the treemap's bands label (ranked by commits until that answer arrives, or if it fails).
+  const byCommits = () => colorMaps.author.assign(authors.filter((a) => !a.is_bot).map((a) => a.name));
+  const topP = filterParams(store.get());
+  for (const [k, v] of Object.entries({ slice: "author", axis: "index", lo: 0, hi: steps, bins: 1, top: 8 })) topP.set(k, String(v));
+  api.keys(repo, topP).then((t) => {
+    colorMaps.author.assign(strCol(t, "label"));
+    byCommits();
+  }).catch(byCommits);
 
   const views = { treemap: new TreemapView(app), tree: new TreeView(app), area: new AreaView(app), bars: new BarsView(app) };
   const grid = h("main", { class: "dash" }, views.treemap.el, views.tree.el, views.area.el, views.bars.el);
@@ -98,6 +109,8 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
   };
   const unsubs = [
     store.watch((s) => s.filterRev, () => sync.reset()),
+    // Bands follow what's shown, the range and the filters (their keys come from /keys).
+    store.watch((s) => [s.settings.colorBy, !!s.compare, s.brush, s.settings.axis, s.filterRev, s.settings.cohortUnit, s.settings.hideBots, s.settings.exclude], () => app.composition.update(), true),
     // Directory keys are relative to the root at a depth: a new root or depth is a new key space.
     store.watch((s) => [s.root, s.settings.areaDepth], () => colorMaps.dir.reset()),
     store.watch((s) => s.cursor, (c) => void sync.goto(c)),

@@ -144,6 +144,58 @@ fn git_last_edits(
     out
 }
 
+/// Integer columns of an Arrow IPC response, row by row.
+fn int_rows(bytes: &[u8], cols: &[&str]) -> Vec<Vec<i64>> {
+    use arrow::array::{Array, Int64Array};
+    let reader =
+        arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None).unwrap();
+    let mut rows = Vec::new();
+    for batch in reader {
+        let b = batch.unwrap();
+        let arrays: Vec<Int64Array> = cols
+            .iter()
+            .map(|name| {
+                let c = arrow::compute::cast(
+                    b.column_by_name(name).unwrap(),
+                    &arrow::datatypes::DataType::Int64,
+                )
+                .unwrap();
+                c.as_any().downcast_ref::<Int64Array>().unwrap().clone()
+            })
+            .collect();
+        for i in 0..b.num_rows() {
+            rows.push(arrays.iter().map(|a| a.value(i)).collect());
+        }
+    }
+    rows
+}
+
+/// String columns of an Arrow IPC response, row by row.
+fn str_rows(bytes: &[u8], cols: &[&str]) -> Vec<Vec<String>> {
+    use arrow::array::{Array, StringArray};
+    let reader =
+        arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None).unwrap();
+    let mut rows = Vec::new();
+    for batch in reader {
+        let b = batch.unwrap();
+        let arrays: Vec<StringArray> = cols
+            .iter()
+            .map(|name| {
+                let c = arrow::compute::cast(
+                    b.column_by_name(name).unwrap(),
+                    &arrow::datatypes::DataType::Utf8,
+                )
+                .unwrap();
+                c.as_any().downcast_ref::<StringArray>().unwrap().clone()
+            })
+            .collect();
+        for i in 0..b.num_rows() {
+            rows.push(arrays.iter().map(|a| a.value(i).to_string()).collect());
+        }
+    }
+    rows
+}
+
 /// (path_id, lines, edited) rows of a /state response.
 fn state_rows(bytes: &[u8]) -> Vec<(u32, i64, i64)> {
     use arrow::array::{Array, Int64Array};
@@ -379,7 +431,216 @@ fn check_repo(name: &str) {
         }
     }
 
-    // 6. The query endpoints run.
+    // 6. Per-file composition (the treemap's bands). At HEAD, with every author tracked, each
+    //    file's lines per canonical author equal `git blame -w HEAD` grouped the same way.
+    let (canon_of_email, canon_ids): (HashMap<String, i64>, Vec<i64>) = db
+        .with(&id, |c, s| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT lower(email), canonical_id::BIGINT FROM {s}.authors"
+            ))?;
+            let map: HashMap<String, i64> = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<_, _>>()?;
+            let mut ids: Vec<i64> = map.values().copied().collect();
+            ids.sort();
+            ids.dedup();
+            Ok((map, ids))
+        })
+        .unwrap();
+    let last_step = *shas.values().max().unwrap();
+    let comp = |slice: strata_store::Slice,
+                unit: &str,
+                keys: Vec<i64>,
+                mode: strata_store::AreaMode,
+                from: i64,
+                to: u32,
+                f: &Filters| {
+        let q = strata_store::CompositionQuery {
+            area: strata_store::AreaQuery {
+                slice,
+                mode,
+                depth: 1,
+                top: 8,
+                unit: unit.into(),
+            },
+            keys,
+            mode,
+            from,
+            to,
+        };
+        (
+            int_rows(&db.composition(&id, f, &q).unwrap(), &["path_id", "k", "v"]),
+            int_rows(
+                &db.origins(&id, f, &q).unwrap(),
+                &["step", "path_id", "k", "v"],
+            ),
+        )
+    };
+    let size = strata_store::AreaMode::Size;
+    let flow = strata_store::AreaMode::Flow;
+    let (rows, _) = comp(
+        strata_store::Slice::Author,
+        "year",
+        canon_ids.clone(),
+        size,
+        -1,
+        last_step,
+        &Filters::default(),
+    );
+    let got: HashMap<(String, i64), i64> = rows
+        .iter()
+        .map(|r| {
+            (
+                (paths[&(r[0] as u32)].clone(), canon_ids[r[1] as usize]),
+                r[2],
+            )
+        })
+        .collect();
+    let mut want: HashMap<(String, i64), i64> = HashMap::new();
+    for ((path, mail), n) in &theirs {
+        *want
+            .entry((path.clone(), canon_of_email[mail]))
+            .or_insert(0) += n;
+    }
+    assert_eq!(
+        got, want,
+        "{name}: composition per file and canonical author differs from git blame"
+    );
+
+    //    Summed over files, each tracked key (from /keys) and "(other)" equal the area chart's
+    //    layer at that step, for authors and cohorts, with and without hidden categories.
+    for exclude in [vec![], vec![4u8, 5, 6, 7]] {
+        let f = Filters {
+            exclude,
+            ..Default::default()
+        };
+        for (slice, unit) in [
+            (strata_store::Slice::Author, "year"),
+            (strata_store::Slice::Cohort, "month"),
+            (strata_store::Slice::Cohort, "year"),
+        ] {
+            for step in [last_step / 2, last_step] {
+                let bins = strata_store::Bins {
+                    axis: strata_store::Axis::Index,
+                    lo: 0.0,
+                    hi: f64::from(step) + 1.0,
+                    bins: step + 1,
+                };
+                let aq = strata_store::AreaQuery {
+                    slice,
+                    mode: size,
+                    depth: 1,
+                    top: 3,
+                    unit: unit.into(),
+                };
+                let keys = str_rows(&db.keys(&id, &f, &bins, &aq).unwrap(), &["key", "label"]);
+                let (rows, _) = comp(
+                    slice,
+                    unit,
+                    keys.iter().map(|k| k[0].parse().unwrap()).collect(),
+                    size,
+                    -1,
+                    step,
+                    &f,
+                );
+                let mut got: HashMap<String, i64> = HashMap::new();
+                for r in &rows {
+                    let label = if r[1] < 0 {
+                        "(other)".to_string()
+                    } else {
+                        keys[r[1] as usize][1].clone()
+                    };
+                    *got.entry(label).or_insert(0) += r[2];
+                }
+                let want: HashMap<String, i64> = area_last(&db.area(&id, &f, &bins, &aq).unwrap())
+                    .into_iter()
+                    .filter(|(_, v)| *v != 0.0)
+                    .map(|(k, v)| (k, v as i64))
+                    .collect();
+                assert_eq!(
+                    got, want,
+                    "{name}: {slice:?}/{unit} composition sums vs area at step {step}"
+                );
+            }
+        }
+    }
+
+    //    Playback: a snapshot plus the per-step rows after it equals a later snapshot (size), and
+    //    the lines changed over two windows add up (flow). A pure move changes no lines.
+    let tracked: Vec<i64> = canon_ids.iter().take(2).copied().collect();
+    let as_map = |rows: &[Vec<i64>], cols: (usize, usize, usize)| -> HashMap<(i64, i64), i64> {
+        let mut m = HashMap::new();
+        for r in rows {
+            *m.entry((r[cols.0], r[cols.1])).or_insert(0) += r[cols.2];
+        }
+        m.retain(|_, v| *v != 0);
+        m
+    };
+    let mid = last_step / 2;
+    for mode in [size, flow] {
+        let (at_mid, _) = comp(
+            strata_store::Slice::Author,
+            "year",
+            tracked.clone(),
+            mode,
+            0,
+            mid,
+            &Filters::default(),
+        );
+        let (at_end, _) = comp(
+            strata_store::Slice::Author,
+            "year",
+            tracked.clone(),
+            mode,
+            0,
+            last_step,
+            &Filters::default(),
+        );
+        let (_, between) = comp(
+            strata_store::Slice::Author,
+            "year",
+            tracked.clone(),
+            mode,
+            i64::from(mid),
+            last_step,
+            &Filters::default(),
+        );
+        let mut sum = as_map(&at_mid, (0, 1, 2));
+        for (k, v) in as_map(&between, (1, 2, 3)) {
+            *sum.entry(k).or_insert(0) += v;
+        }
+        sum.retain(|_, v| *v != 0);
+        assert_eq!(
+            sum,
+            as_map(&at_end, (0, 1, 2)),
+            "{name}: {mode:?} snapshot + playback rows vs later snapshot"
+        );
+    }
+    let pure_moves: Vec<u32> = db
+        .with(&id, |c, s| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT step FROM {s}.changes GROUP BY step HAVING bool_and(kind IN (3, 4) AND adds + dels = 0)"
+            ))?;
+            Ok(stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?)
+        })
+        .unwrap();
+    for step in pure_moves {
+        let (rows, _) = comp(
+            strata_store::Slice::Cohort,
+            "month",
+            vec![],
+            flow,
+            i64::from(step) - 1,
+            step,
+            &Filters::default(),
+        );
+        assert!(
+            rows.is_empty(),
+            "{name}: pure move at step {step} counted as lines changed: {rows:?}"
+        );
+    }
+
+    // 7. The query endpoints run.
     let f = Filters {
         exclude: vec![4, 5, 6, 7],
         ..Default::default()
@@ -548,6 +809,38 @@ fn shallow_clone_starts_with_an_import_step() {
     assert_eq!(flags0 & 5, 5, "first step flagged IMPORT | SHALLOW_ROOT");
     // HEAD of `linear` has 12 + 7 + 1 lines.
     assert_eq!(lines, 20);
+}
+
+/// Per key, the value at its last bin in a size-mode area query.
+fn area_last(bytes: &[u8]) -> HashMap<String, f64> {
+    let mut last: HashMap<String, (i64, f64)> = HashMap::new();
+    let bins = int_rows(bytes, &["bin"]);
+    let keys = str_rows(bytes, &["key"]);
+    let vals = {
+        use arrow::array::{Array, Float64Array};
+        let reader =
+            arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None).unwrap();
+        let mut v = Vec::new();
+        for batch in reader {
+            let b = batch.unwrap();
+            let c = b
+                .column_by_name("value")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .clone();
+            v.extend((0..b.num_rows()).map(|i| c.value(i)));
+        }
+        v
+    };
+    for i in 0..vals.len() {
+        let e = last.entry(keys[i][0].clone()).or_insert((i64::MIN, 0.0));
+        if bins[i][0] >= e.0 {
+            *e = (bins[i][0], vals[i]);
+        }
+    }
+    last.into_iter().map(|(k, (_, v))| (k, v)).collect()
 }
 
 /// Last-bin totals of a size-mode area query (decoded from Arrow IPC).

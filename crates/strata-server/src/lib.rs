@@ -22,7 +22,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use strata_engine::ExtractOptions;
 use strata_store::pipeline::Credentials;
-use strata_store::{AreaMode, AreaQuery, Axis, Bins, Db, Filters, Layout, Slice, Source};
+use strata_store::{
+    AreaMode, AreaQuery, Axis, Bins, CompositionQuery, Db, Filters, Layout, Slice, Source,
+};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -242,13 +244,8 @@ async fn repo_bars(
     Ok(arrow(blocking(move || st.db.bars(&repo, &f, &b)).await?))
 }
 
-async fn repo_area(
-    State(st): State<Shared>,
-    Path(repo): Path<String>,
-    Query(q): Query<HashMap<String, String>>,
-) -> ApiResult<Response> {
-    let (f, b) = (filters(&q), bins(&q)?);
-    let aq = AreaQuery {
+fn area_query(q: &HashMap<String, String>) -> AreaQuery {
+    AreaQuery {
         slice: match q.get("slice").map(String::as_str) {
             Some("lang") => Slice::Lang,
             Some("author") => Slice::Author,
@@ -263,9 +260,65 @@ async fn repo_area(
         depth: q.get("depth").and_then(|v| v.parse().ok()).unwrap_or(1),
         top: q.get("top").and_then(|v| v.parse().ok()).unwrap_or(12),
         unit: q.get("unit").cloned().unwrap_or_else(|| "year".into()),
-    };
+    }
+}
+
+async fn repo_area(
+    State(st): State<Shared>,
+    Path(repo): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Response> {
+    let (f, b, aq) = (filters(&q), bins(&q)?, area_query(&q));
     Ok(arrow(
         blocking(move || st.db.area(&repo, &f, &b, &aq)).await?,
+    ))
+}
+
+async fn repo_keys(
+    State(st): State<Shared>,
+    Path(repo): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Response> {
+    let (f, b, aq) = (filters(&q), bins(&q)?, area_query(&q));
+    Ok(arrow(
+        blocking(move || st.db.keys(&repo, &f, &b, &aq)).await?,
+    ))
+}
+
+/// `slice`, `unit`, `keys` (comma-separated), `mode` (size|flow), `from` (exclusive), `to`.
+fn composition_query(q: &HashMap<String, String>) -> ApiResult<CompositionQuery> {
+    let area = area_query(q);
+    Ok(CompositionQuery {
+        mode: area.mode,
+        keys: q
+            .get("keys")
+            .map(|v| v.split(',').filter_map(|k| k.trim().parse().ok()).collect())
+            .unwrap_or_default(),
+        from: q.get("from").and_then(|v| v.parse().ok()).unwrap_or(-1),
+        to: num_param::<u32>(q, "to")?,
+        area,
+    })
+}
+
+async fn repo_composition(
+    State(st): State<Shared>,
+    Path(repo): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Response> {
+    let (f, cq) = (filters(&q), composition_query(&q)?);
+    Ok(arrow(
+        blocking(move || st.db.composition(&repo, &f, &cq)).await?,
+    ))
+}
+
+async fn repo_origins(
+    State(st): State<Shared>,
+    Path(repo): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Response> {
+    let (f, cq) = (filters(&q), composition_query(&q)?);
+    Ok(arrow(
+        blocking(move || st.db.origins(&repo, &f, &cq)).await?,
     ))
 }
 
@@ -418,6 +471,9 @@ pub fn router(state: Shared) -> Router {
         .route("/r/{repo}/authors", get(repo_authors))
         .route("/r/{repo}/bars", get(repo_bars))
         .route("/r/{repo}/area", get(repo_area))
+        .route("/r/{repo}/keys", get(repo_keys))
+        .route("/r/{repo}/composition", get(repo_composition))
+        .route("/r/{repo}/origins", get(repo_origins))
         .route("/r/{repo}/state", get(repo_state))
         .route("/r/{repo}/events", get(repo_events))
         .route("/r/{repo}/compare", get(repo_compare))

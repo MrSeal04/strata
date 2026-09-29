@@ -145,6 +145,12 @@ export const api = {
   state: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/state?${p}`, signal),
   events: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/events?${p}`, signal),
   compare: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/compare?${p}`, signal),
+  /** The keys an area query labels, best first (key, label). */
+  keys: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/keys?${p}`, signal),
+  /** Per file and tracked key: surviving lines (size) or lines changed (flow). */
+  composition: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/composition?${p}`, signal),
+  /** `composition` rows per step over (from, to], for playback. */
+  origins: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/origins?${p}`, signal),
   step: (repo: string, n: number) => json<StepDetail>(`${base(repo)}/step/${n}`),
   commits: (repo: string, p: URLSearchParams) => json<CommitRow[]>(`${base(repo)}/commits?${p}`),
   search: (repo: string, q: string, kind: string) =>

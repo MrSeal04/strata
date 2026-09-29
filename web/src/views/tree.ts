@@ -142,6 +142,15 @@ export class TreeView extends View {
       legend();
       this.invalidate();
     });
+    colorMaps.author.onChange(() => {
+      if (app.store.get().settings.colorBy !== "author") return;
+      legend();
+      this.invalidate();
+    });
+    app.composition.onChange(() => {
+      legend();
+      this.invalidate();
+    });
   }
 
   private key(): string {

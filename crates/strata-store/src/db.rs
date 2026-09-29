@@ -564,6 +564,123 @@ impl Db {
         })
     }
 
+    /// Per (step, key) sums (`k0` CTE: step, key, v, a, d) and the SQL labelling a key, for an
+    /// area or keys query. Keys are computed once per path (dir/lang) or are integers
+    /// (author/cohort) so the per-change work is only joins and sums.
+    fn area_k0(
+        &self,
+        c: &Connection,
+        s: &str,
+        f: &Filters,
+        q: &AreaQuery,
+    ) -> anyhow::Result<(String, String)> {
+        let pp = f.path_pred();
+        let filtered = pp != "TRUE";
+        // Common case (no folder filter; language filter only for the language slice): read a
+        // per-repo aggregate by (step, key, category), built on first use, instead of every
+        // change or survival row.
+        let simple =
+            f.root.trim_matches('/').is_empty() && (f.langs.is_empty() || q.slice == Slice::Lang);
+        let agg = if simple {
+            Some(self.ensure_area_agg(c, s, q)?)
+        } else {
+            None
+        };
+        Ok(match (q.slice, agg) {
+            (_, Some(table)) => {
+                let mut pred = vec!["TRUE".to_string()];
+                if !f.exclude.is_empty() {
+                    pred.push(format!(
+                        "category NOT IN ({})",
+                        f.exclude
+                            .iter()
+                            .map(u8::to_string)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ));
+                }
+                if q.slice == Slice::Lang && !f.langs.is_empty() {
+                    pred.push(format!(
+                        "key IN ({})",
+                        f.langs
+                            .iter()
+                            .map(|l| sql_str(l))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ));
+                }
+                if q.slice == Slice::Author && f.hide_bots {
+                    pred.push("NOT is_bot".into());
+                }
+                let (a, d) = if f.ws && matches!(q.slice, Slice::Dir | Slice::Lang) {
+                    ("aw", "dw")
+                } else {
+                    ("a", "d")
+                };
+                let key = match (q.slice, q.unit.as_str()) {
+                    (Slice::Cohort, "month") => "key",
+                    (Slice::Cohort, "quarter") => "key // 3",
+                    (Slice::Cohort, _) => "key // 12",
+                    _ => "key",
+                };
+                (
+                    format!(
+                        "k0 AS (SELECT step, {key} AS key, sum(v)::BIGINT AS v, sum({a})::BIGINT AS a, sum({d})::BIGINT AS d
+                                FROM {s}.{table} WHERE {pred} GROUP BY ALL)",
+                        pred = pred.join(" AND ")
+                    ),
+                    key_label(s, q),
+                )
+            }
+            (Slice::Dir | Slice::Lang, None) => {
+                let root = f.root.trim_matches('/');
+                let rel = if root.is_empty() {
+                    "p.path".to_string()
+                } else {
+                    format!("substr(p.path, {})", root.len() + 2)
+                };
+                let depth = q.depth.clamp(1, 8);
+                let key = if q.slice == Slice::Lang {
+                    "p.lang".to_string()
+                } else {
+                    format!(
+                        "CASE WHEN len(string_split({rel}, '/')) > {depth}
+                              THEN array_to_string(string_split({rel}, '/')[1:{depth}], '/')
+                              ELSE coalesce(nullif(array_to_string(string_split({rel}, '/')[1:-2], '/'), ''), '(files)') END"
+                    )
+                };
+                (
+                    format!(
+                        "pk AS (SELECT path_id, {key} AS key FROM {s}.paths p WHERE {pp}),
+                         k0 AS (SELECT c.step, pk.key, sum(c.line_delta)::BIGINT AS v, sum(c.{a})::BIGINT AS a,
+                                       sum(c.{d})::BIGINT AS d
+                                FROM {s}.changes c JOIN pk USING (path_id) GROUP BY ALL)",
+                        a = f.adds(),
+                        d = f.dels(),
+                    ),
+                    "key".to_string(),
+                )
+            }
+            (Slice::Author | Slice::Cohort, None) => {
+                let paths = if filtered {
+                    format!("AND o.path_id IN (SELECT path_id FROM {s}.paths p WHERE {pp})")
+                } else {
+                    String::new()
+                };
+                let (join, bots) = origin_join(s, f, q.slice);
+                (
+                    format!(
+                        "k0 AS (SELECT o.step, {key} AS key, sum(o.delta)::BIGINT AS v,
+                                       sum(greatest(o.delta, 0))::BIGINT AS a, sum(greatest(-o.delta, 0))::BIGINT AS d
+                                FROM {s}.origin_deltas o {join} WHERE TRUE {paths} {bots} GROUP BY ALL)",
+                        key = origin_key(q),
+                    ),
+                    key_label(s, q),
+                )
+            }
+        })
+    }
+
     /// Stacked area series in long format: (bin, key, value) for size, (bin, key, adds, dels) for flow.
     /// Size rows are cumulative per key at the bins where the key changed; bin -1 is the baseline
     /// before `lo`. Clients forward-fill.
@@ -576,137 +693,101 @@ impl Db {
     ) -> anyhow::Result<Vec<u8>> {
         self.with(repo, |c, s| {
             let (bin, below_hi) = b.bin_expr();
-            let pp = f.path_pred();
-            let filtered = pp != "TRUE";
-            let top = q.top.clamp(1, 60);
-            // k0: per (step, key) sums. Keys are computed once per path (dir/lang) or are integers
-            // (author/cohort) so the per-change work is only joins and sums.
-            // Common case (no folder filter; language filter only for the language slice): read a
-            // per-repo aggregate by (step, key, category), built on first use, instead of every
-            // change or survival row.
-            let simple = f.root.trim_matches('/').is_empty() && (f.langs.is_empty() || q.slice == Slice::Lang);
-            let agg = if simple { Some(self.ensure_area_agg(c, s, q)?) } else { None };
-            let (k0, label) = match (q.slice, agg) {
-                (_, Some(table)) => {
-                    let mut pred = vec!["TRUE".to_string()];
-                    if !f.exclude.is_empty() {
-                        pred.push(format!("category NOT IN ({})", f.exclude.iter().map(u8::to_string).collect::<Vec<_>>().join(",")));
-                    }
-                    if q.slice == Slice::Lang && !f.langs.is_empty() {
-                        pred.push(format!("key IN ({})", f.langs.iter().map(|l| sql_str(l)).collect::<Vec<_>>().join(",")));
-                    }
-                    if q.slice == Slice::Author && f.hide_bots {
-                        pred.push("NOT is_bot".into());
-                    }
-                    let (a, d) = if f.ws && matches!(q.slice, Slice::Dir | Slice::Lang) { ("aw", "dw") } else { ("a", "d") };
-                    let key = match (q.slice, q.unit.as_str()) {
-                        (Slice::Cohort, "month") => "key",
-                        (Slice::Cohort, "quarter") => "key // 3",
-                        (Slice::Cohort, _) => "key // 12",
-                        _ => "key",
-                    };
-                    let label = match (q.slice, q.unit.as_str()) {
-                        (Slice::Author, _) => format!("coalesce((SELECT any_value(name) FROM {s}.canon WHERE canonical_id = key), 'author ' || key::VARCHAR)"),
-                        (Slice::Cohort, "month") => "strftime(make_date(1970 + (key // 12)::INTEGER, 1 + (key % 12)::INTEGER, 1), '%Y-%m')".to_string(),
-                        (Slice::Cohort, "quarter") => "(1970 + key // 4)::VARCHAR || '-Q' || (1 + key % 4)::VARCHAR".to_string(),
-                        (Slice::Cohort, _) => "(1970 + key)::VARCHAR".to_string(),
-                        _ => "key".to_string(),
-                    };
-                    (
-                        format!(
-                            "k0 AS (SELECT step, {key} AS key, sum(v)::BIGINT AS v, sum({a})::BIGINT AS a, sum({d})::BIGINT AS d
-                                    FROM {s}.{table} WHERE {pred} GROUP BY ALL)",
-                            pred = pred.join(" AND ")
-                        ),
-                        label,
-                    )
-                }
-                (Slice::Dir | Slice::Lang, None) => {
-                    let root = f.root.trim_matches('/');
-                    let rel = if root.is_empty() { "p.path".to_string() } else { format!("substr(p.path, {})", root.len() + 2) };
-                    let depth = q.depth.clamp(1, 8);
-                    let key = if q.slice == Slice::Lang {
-                        "p.lang".to_string()
-                    } else {
-                        format!(
-                            "CASE WHEN len(string_split({rel}, '/')) > {depth}
-                                  THEN array_to_string(string_split({rel}, '/')[1:{depth}], '/')
-                                  ELSE coalesce(nullif(array_to_string(string_split({rel}, '/')[1:-2], '/'), ''), '(files)') END"
-                        )
-                    };
-                    (
-                        format!(
-                            "pk AS (SELECT path_id, {key} AS key FROM {s}.paths p WHERE {pp}),
-                             k0 AS (SELECT c.step, pk.key, sum(c.line_delta)::BIGINT AS v, sum(c.{a})::BIGINT AS a,
-                                           sum(c.{d})::BIGINT AS d
-                                    FROM {s}.changes c JOIN pk USING (path_id) GROUP BY ALL)",
-                            a = f.adds(),
-                            d = f.dels(),
-                        ),
-                        "key".to_string(),
-                    )
-                }
-                (Slice::Author | Slice::Cohort, None) => {
-                    let paths = if filtered { format!("AND o.path_id IN (SELECT path_id FROM {s}.paths p WHERE {pp})") } else { String::new() };
-                    let (key, join, bots) = if q.slice == Slice::Author {
-                        let bots = if f.hide_bots { "AND NOT k.is_bot" } else { "" };
-                        ("k.canonical_id::BIGINT", format!("JOIN {s}.canon k ON k.author_id = o.author_id"), bots)
-                    } else {
-                        let div = match q.unit.as_str() {
-                            "month" => 1,
-                            "quarter" => 3,
-                            _ => 12,
-                        };
-                        (if div == 1 { "o.cohort::BIGINT" } else { if div == 3 { "(o.cohort // 3)::BIGINT" } else { "(o.cohort // 12)::BIGINT" } }, String::new(), "")
-                    };
-                    let label = match (q.slice, q.unit.as_str()) {
-                        (Slice::Author, _) => format!("coalesce((SELECT any_value(name) FROM {s}.canon WHERE canonical_id = key), 'author ' || key::VARCHAR)"),
-                        (_, "month") => "strftime(make_date(1970 + (key // 12)::INTEGER, 1 + (key % 12)::INTEGER, 1), '%Y-%m')".to_string(),
-                        (_, "quarter") => "(1970 + key // 4)::VARCHAR || '-Q' || (1 + key % 4)::VARCHAR".to_string(),
-                        _ => "(1970 + key)::VARCHAR".to_string(),
-                    };
-                    (
-                        format!(
-                            "k0 AS (SELECT o.step, {key} AS key, sum(o.delta)::BIGINT AS v,
-                                           sum(greatest(o.delta, 0))::BIGINT AS a, sum(greatest(-o.delta, 0))::BIGINT AS d
-                                    FROM {s}.origin_deltas o {join} WHERE TRUE {paths} {bots} GROUP BY ALL)"
-                        ),
-                        label,
-                    )
-                }
-            };
+            let (k0, label) = self.area_k0(c, s, f, q)?;
+            let rank = rank_sql(s, q, b);
             let base = format!(
                 "WITH {k0},
                  b AS (SELECT {bin} AS bin, k0.key, sum(v)::BIGINT AS v, sum(a)::BIGINT AS a, sum(d)::BIGINT AS d
-                       FROM k0 JOIN {s}.steps s USING (step) WHERE {below_hi} GROUP BY ALL)"
+                       FROM k0 JOIN {s}.steps s USING (step) WHERE {below_hi} GROUP BY ALL),
+                 rk AS (SELECT key, {label} AS label FROM ({rank}))"
             );
             // Labels (author names, cohort dates) are resolved for the top keys only, then joined.
             let sql = match q.mode {
-                AreaMode::Size => {
-                    // Rank by peak size; for authors (tens of thousands of keys on big repos) by
-                    // surviving lines at the end of the range, which needs no per-key window.
-                    let rank = if q.slice == Slice::Author {
-                        format!("SELECT key FROM b GROUP BY key ORDER BY sum(v) DESC, key LIMIT {top}")
-                    } else {
-                        format!(
-                            "SELECT key FROM (SELECT key, sum(v) OVER (PARTITION BY key ORDER BY bin ROWS UNBOUNDED PRECEDING) AS c FROM b)
-                             GROUP BY key ORDER BY max(c) DESC, key LIMIT {top}"
-                        )
-                    };
-                    format!(
-                        "{base},
-                         rk AS (SELECT key, {label} AS label FROM ({rank})),
-                         g AS (SELECT b.bin, coalesce(rk.label, '(other)') AS key, sum(b.v)::BIGINT AS v
-                               FROM b LEFT JOIN rk USING (key) GROUP BY ALL)
-                         SELECT bin, key, (sum(v) OVER (PARTITION BY key ORDER BY bin ROWS UNBOUNDED PRECEDING))::DOUBLE AS value
-                         FROM g ORDER BY bin, key"
-                    )
-                }
-                AreaMode::Flow => format!(
+                AreaMode::Size => format!(
                     "{base},
-                     rk AS (SELECT key, {label} AS label FROM (SELECT key FROM b WHERE bin >= 0 GROUP BY key ORDER BY sum(a + d) DESC, key LIMIT {top}))
+                     g AS (SELECT b.bin, coalesce(rk.label, '(other)') AS key, sum(b.v)::BIGINT AS v
+                           FROM b LEFT JOIN rk USING (key) GROUP BY ALL)
+                     SELECT bin, key, (sum(v) OVER (PARTITION BY key ORDER BY bin ROWS UNBOUNDED PRECEDING))::DOUBLE AS value
+                     FROM g ORDER BY bin, key"
+                ),
+                AreaMode::Flow => format!(
+                    "{base}
                      SELECT b.bin, coalesce(rk.label, '(other)') AS key, sum(b.a)::DOUBLE AS adds, sum(b.d)::DOUBLE AS dels
                      FROM b LEFT JOIN rk USING (key) WHERE b.bin >= 0 GROUP BY ALL ORDER BY bin, key"
+                ),
+            };
+            self.ipc_cached(c, &sql)
+        })
+    }
+
+    /// The keys an area query labels (the rest is "(other)"), best first: (key, label). Views
+    /// that break the same data down another way (the treemap's bands) use exactly these.
+    pub fn keys(
+        &self,
+        repo: &str,
+        f: &Filters,
+        b: &Bins,
+        q: &AreaQuery,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.with(repo, |c, s| {
+            let (k0, label) = self.area_k0(c, s, f, q)?;
+            let rank = rank_sql(s, q, b);
+            self.ipc_cached(
+                c,
+                &format!(
+                    "WITH {k0}, r AS ({rank})
+                 SELECT key::VARCHAR AS key, {label} AS label FROM r ORDER BY rn"
+                ),
+            )
+        })
+    }
+
+    /// Surviving lines (size, up to `to`) or lines changed (flow, over `(from, to]`) per file and
+    /// key of an author or cohort slice. `keys` are the tracked keys (from `keys`), returned as
+    /// their index; everything else is -1. Flow nets a rename's lines moved from the old path
+    /// against the new one, so only real edits count.
+    pub fn composition(
+        &self,
+        repo: &str,
+        f: &Filters,
+        q: &CompositionQuery,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.with(repo, |c, s| {
+            let (src, grouped) = origin_rows(s, f, q, false);
+            let sql = match q.mode {
+                AreaMode::Size => format!(
+                    "SELECT o.path_id, {idx}::SMALLINT AS k, sum(o.delta)::INTEGER AS v {src}
+                     GROUP BY ALL HAVING sum(o.delta) > 0",
+                    idx = key_index(q),
+                ),
+                AreaMode::Flow => format!(
+                    "WITH net AS ({grouped})
+                     SELECT path_id, k, sum(abs(d))::INTEGER AS v FROM net GROUP BY ALL HAVING sum(abs(d)) > 0"
+                ),
+            };
+            self.ipc_cached(c, &sql)
+        })
+    }
+
+    /// Per-step rows of `composition` over `(from, to]` for forward playback: (step, path_id, k, v)
+    /// where v adds to the file's value (a signed delta for size, lines changed for flow).
+    pub fn origins(
+        &self,
+        repo: &str,
+        f: &Filters,
+        q: &CompositionQuery,
+    ) -> anyhow::Result<Vec<u8>> {
+        self.with(repo, |c, s| {
+            let (src, grouped) = origin_rows(s, f, q, true);
+            let sql = match q.mode {
+                AreaMode::Size => format!(
+                    "SELECT o.step::INTEGER AS step, o.path_id, {idx}::SMALLINT AS k, sum(o.delta)::INTEGER AS v {src}
+                     GROUP BY ALL HAVING sum(o.delta) <> 0 ORDER BY step",
+                    idx = key_index(q),
+                ),
+                AreaMode::Flow => format!(
+                    "WITH net AS ({grouped})
+                     SELECT step::INTEGER AS step, path_id, k, abs(d)::INTEGER AS v FROM net WHERE d <> 0 ORDER BY step"
                 ),
             };
             self.ipc_cached(c, &sql)
@@ -1017,6 +1098,136 @@ impl Db {
             ))
         })
     }
+}
+
+/// SQL for the label of an area key.
+fn key_label(s: &str, q: &AreaQuery) -> String {
+    match (q.slice, q.unit.as_str()) {
+        (Slice::Author, _) => format!(
+            "coalesce((SELECT any_value(name) FROM {s}.canon WHERE canonical_id = key), 'author ' || key::VARCHAR)"
+        ),
+        (Slice::Cohort, "month") => {
+            "strftime(make_date(1970 + (key // 12)::INTEGER, 1 + (key % 12)::INTEGER, 1), '%Y-%m')"
+                .to_string()
+        }
+        (Slice::Cohort, "quarter") => {
+            "(1970 + key // 4)::VARCHAR || '-Q' || (1 + key % 4)::VARCHAR".to_string()
+        }
+        (Slice::Cohort, _) => "(1970 + key)::VARCHAR".to_string(),
+        _ => "key".to_string(),
+    }
+}
+
+/// Key of an `origin_deltas o` row for the author or cohort slice.
+fn origin_key(q: &AreaQuery) -> &'static str {
+    match (q.slice, q.unit.as_str()) {
+        (Slice::Author, _) => "k.canonical_id::BIGINT",
+        (_, "month") => "o.cohort::BIGINT",
+        (_, "quarter") => "(o.cohort // 3)::BIGINT",
+        _ => "(o.cohort // 12)::BIGINT",
+    }
+}
+
+/// Join and bot filter an `origin_deltas o` query needs for a slice.
+fn origin_join(s: &str, f: &Filters, slice: Slice) -> (String, &'static str) {
+    if slice == Slice::Author {
+        let bots = if f.hide_bots { "AND NOT k.is_bot" } else { "" };
+        (
+            format!("JOIN {s}.canon k ON k.author_id = o.author_id"),
+            bots,
+        )
+    } else {
+        (String::new(), "")
+    }
+}
+
+/// Ranked top keys of an area query, `SELECT key, rn`: by surviving lines at the end of the range
+/// for authors (tens of thousands of keys on big repos; needs no per-key window), by peak size
+/// within the range otherwise, by lines changed within it in flow mode. Ranked per step, so the
+/// choice doesn't depend on how the chart is binned.
+fn rank_sql(s: &str, q: &AreaQuery, b: &Bins) -> String {
+    let (_, below_hi) = b.bin_expr();
+    let x = b.x_col();
+    let top = q.top.clamp(1, 60);
+    match (q.mode, q.slice) {
+        (AreaMode::Size, Slice::Author) => format!(
+            "SELECT key, row_number() OVER (ORDER BY sum(v) DESC, key) AS rn
+             FROM k0 JOIN {s}.steps s USING (step) WHERE {below_hi} GROUP BY key QUALIFY rn <= {top}"
+        ),
+        (AreaMode::Size, _) => format!(
+            "SELECT key, row_number() OVER (ORDER BY greatest(coalesce(max(c) FILTER (WHERE x >= {lo}), 0),
+                                                              coalesce(arg_max(c, step) FILTER (WHERE x < {lo}), 0)) DESC, key) AS rn
+             FROM (SELECT k0.key, k0.step, {x} AS x, sum(k0.v) OVER (PARTITION BY k0.key ORDER BY k0.step ROWS UNBOUNDED PRECEDING) AS c
+                   FROM k0 JOIN {s}.steps s USING (step) WHERE {below_hi})
+             GROUP BY key QUALIFY rn <= {top}",
+            lo = b.lo,
+        ),
+        (AreaMode::Flow, _) => format!(
+            "SELECT key, row_number() OVER (ORDER BY sum(a + d) DESC, key) AS rn
+             FROM k0 JOIN {s}.steps s USING (step) WHERE {x} >= {lo} AND {below_hi} GROUP BY key QUALIFY rn <= {top}",
+            lo = b.lo,
+        ),
+    }
+}
+
+/// A per-file breakdown of the author or cohort slice (the treemap's bands).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompositionQuery {
+    /// Slice (author or cohort) and cohort `unit`; depth and top are unused.
+    pub area: AreaQuery,
+    /// Tracked keys (canonical author ids or cohort buckets), in index order.
+    pub keys: Vec<i64>,
+    /// Size: surviving lines up to `to`. Flow: lines changed over `(from, to]`.
+    pub mode: AreaMode,
+    pub from: i64,
+    pub to: u32,
+}
+
+/// Index of an origin row's key in the tracked keys, or -1.
+fn key_index(q: &CompositionQuery) -> String {
+    if q.keys.is_empty() {
+        return "-1".to_string();
+    }
+    let list = q
+        .keys
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "(coalesce(list_position([{list}]::BIGINT[], {key}), 0) - 1)",
+        key = origin_key(&q.area)
+    )
+}
+
+/// The origin rows a composition reads: `FROM … WHERE …` up to `to` (from the start, unless
+/// `window`: over `(from, to]`), and for flow, those rows over `(from, to]` netted per (step,
+/// file, key) with a rename's source re-keyed to its destination: `SELECT step, path_id, k, d`.
+fn origin_rows(s: &str, f: &Filters, q: &CompositionQuery, window: bool) -> (String, String) {
+    let pp = f.path_pred();
+    let paths = if pp != "TRUE" {
+        format!("AND o.path_id IN (SELECT path_id FROM {s}.paths p WHERE {pp})")
+    } else {
+        String::new()
+    };
+    let (join, bots) = origin_join(s, f, q.area.slice);
+    let (from, to) = (q.from, q.to);
+    let lower = if window {
+        format!("AND o.step > {from}")
+    } else {
+        String::new()
+    };
+    let src =
+        format!("FROM {s}.origin_deltas o {join} WHERE o.step <= {to} {lower} {paths} {bots}");
+    let grouped = format!(
+        "SELECT o.step, coalesce(ren.dst, o.path_id) AS path_id, {idx}::SMALLINT AS k, sum(o.delta) AS d
+         FROM {s}.origin_deltas o {join}
+         LEFT JOIN (SELECT step, old_path_id AS src, path_id AS dst FROM {s}.changes
+                    WHERE kind = 3 AND step > {from} AND step <= {to}) ren ON ren.step = o.step AND ren.src = o.path_id
+         WHERE o.step > {from} AND o.step <= {to} {paths} {bots} GROUP BY ALL",
+        idx = key_index(q),
+    );
+    (src, grouped)
 }
 
 /// `state_sql` plus `edited`: the step that last changed each file's content. Every change row

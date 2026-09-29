@@ -172,8 +172,14 @@ export function fileColor(app: App, node: TNode, mode: ColorBy, now: number): st
     case "dir":
       return dirColor(app, f.pathId);
     case "author":
-      return f.topAuthor < 0 ? pal.other : colorMaps.author.color(app.authorName(f.topAuthor));
     case "cohort": {
+      // The key holding most of the file's lines, once the bands are loaded.
+      const comp = app.composition;
+      if (comp.ready(mode)) {
+        const k = comp.dominant(f.pathId);
+        return k === undefined ? pal.other : comp.color(k);
+      }
+      if (mode === "author") return f.topAuthor < 0 ? pal.other : colorMaps.author.color(app.authorName(f.topAuthor));
       if (f.mot <= 0) return pal.other;
       const unit = cohortUnit(app);
       const [first, last] = cohortRange(app, unit);

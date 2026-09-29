@@ -124,6 +124,15 @@ export class TreemapView extends View {
     colorMaps.dir.onChange(() => {
       if (app.store.get().settings.colorBy === "dir") legend();
     });
+    colorMaps.author.onChange(() => {
+      if (app.store.get().settings.colorBy !== "author") return;
+      legend();
+      this.invalidate();
+    });
+    app.composition.onChange(() => {
+      legend();
+      this.invalidate();
+    });
     app.store.watch((s) => [s.root, s.compare, s.filterRev, s.settings.colorBy, s.settings.areaDepth, s.settings.cohortUnit], () => {
       this.layoutKey = "";
       this.updateTitle();
@@ -252,6 +261,24 @@ export class TreemapView extends View {
     this.cullKey = this.viewKey();
   }
 
+  /** Summed bands of every file under a folder, cached per composition revision. */
+  private lodPairs = new WeakMap<TNode, { rev: number; pairs: number[] }>();
+
+  private subtreePairs(n: LNode): number[] | undefined {
+    const comp = this.app.composition;
+    const hit = this.lodPairs.get(n.data);
+    if (hit?.rev === comp.rev) return hit.pairs;
+    const sum = new Map<number, number>();
+    for (const l of n.leaves()) {
+      const a = l.data.file ? comp.of(l.data.file.pathId) : undefined;
+      if (a) for (let j = 0; j < a.length; j += 2) sum.set(a[j], (sum.get(a[j]) ?? 0) + a[j + 1]);
+    }
+    const pairs: number[] = [];
+    for (const [k, v] of sum) pairs.push(k, v);
+    this.lodPairs.set(n.data, { rev: comp.rev, pairs });
+    return pairs.length ? pairs : undefined;
+  }
+
   private viewKey(): string {
     return `${this.layoutKey}|${this.zoom.k}|${this.zoom.x}|${this.zoom.y}`;
   }
@@ -316,9 +343,12 @@ export class TreemapView extends View {
     // Nothing moved and no color input changed: reuse last frame's batches; only the activity
     // rings (a few recently touched files) are recomputed. Most playback frames at scale.
     const sliceKey = colorBy === "dir" ? `${s.settings.areaDepth}:${colorMaps.dir.version}` : colorBy === "cohort" ? cohortUnit(this.app) : colorBy === "heat" ? pos : colorBy === "edited" ? s.cursor : "";
+    // Authors and cohorts split each file into bands by its lines per key, once they're loaded.
+    const comp = this.app.composition;
+    const bandsOn = !comparing && (colorBy === "author" || colorBy === "cohort") && comp.ready(colorBy);
     // Activity rings on just-touched files, except where the colors already say it.
     const ringsOn = colorBy !== "heat" && colorBy !== "edited";
-    const colorKey = `${this.viewKey()}|${colorBy}|${s.settings.theme}|${s.settings.diffColors}|${comparing}|${this.app.compare.data?.key ?? ""}|${s.search?.q ?? ""}|${sliceKey}`;
+    const colorKey = `${this.viewKey()}|${colorBy}|${bandsOn ? comp.rev : ""}|${colorBy === "author" ? colorMaps.author.version : ""}|${s.settings.theme}|${s.settings.diffColors}|${comparing}|${this.app.compare.data?.key ?? ""}|${s.search?.q ?? ""}|${sliceKey}`;
     const reuse = !this.geomMoving && k < 1 && this.frame?.key === colorKey;
     let geom = false;
     let dirs: number[];
@@ -388,13 +418,44 @@ export class TreemapView extends View {
         const f = leaf.file!;
         const fill = comparing ? growthColor(this.app, f.pathId) : fileColor(this.app, leaf, colorBy, pos);
         const alpha = searchPaths && !searchPaths.has(f.pathId) ? 0.2 : 1;
-        const gk = alpha === 1 ? fill : `${fill}|${alpha}`;
-        let g = groups.get(gk);
-        if (!g) {
-          g = { fill, alpha, xywh: [] };
-          groups.set(gk, g);
+        const put = (c: string, x: number, y: number, bw: number, bh: number) => {
+          const gk = alpha === 1 ? c : `${c}|${alpha}`;
+          let g = groups.get(gk);
+          if (!g) {
+            g = { fill: c, alpha, xywh: [] };
+            groups.set(gk, g);
+          }
+          g.xywh.push(x, y, bw, bh);
+        };
+        // A folder drawn as one rect takes its whole subtree's bands (not its largest file's),
+        // so small files' minority authors still count.
+        const pairs = !bandsOn ? undefined : rep ? this.subtreePairs(n) : comp.of(f.pathId);
+        if (pairs && pairs.length > 2 && Math.max(w, hh) < 6) {
+          // Too small to split: the key with the most lines.
+          let best = 0;
+          for (let j = 2; j < pairs.length; j += 2) if (pairs[j + 1] > pairs[best + 1]) best = j;
+          put(comp.color(pairs[best]), X, Y, w, hh);
+        } else if (pairs && pairs.length > 2) {
+          // Strips along the longer side, in band order (authors by rank, cohorts oldest first).
+          let total = 0;
+          for (let j = 1; j < pairs.length; j += 2) total += pairs[j];
+          const across = w >= hh;
+          const len = across ? w : hh;
+          let acc = 0;
+          for (const k of comp.order) {
+            let v = 0;
+            for (let j = 0; j < pairs.length; j += 2) if (pairs[j] === k) v = pairs[j + 1];
+            if (!v) continue;
+            const a0 = (acc / total) * len;
+            acc += v;
+            const a1 = (acc / total) * len;
+            if (a1 - a0 < 0.3) continue;
+            if (across) put(comp.color(k), X + a0, Y, a1 - a0, hh);
+            else put(comp.color(k), X, Y + a0, w, a1 - a0);
+          }
+        } else {
+          put(fill, X, Y, w, hh);
         }
-        g.xywh.push(X, Y, w, hh);
         // Activity cue in every mode: a brief ring on files touched right now.
         if (!comparing && !rep && f.touched >= 0 && pos - f.touched < 400) {
           const ht = heat(this.app, f.touched, pos);
@@ -482,7 +543,19 @@ export class TreemapView extends View {
       return box;
     }
     box.append(tipRow(colorMaps.lang.color(lang), fmt.int(f.lines), `lines · ${lang}`));
-    if (f.topAuthor >= 0) {
+    const colorBy = this.app.store.get().settings.colorBy;
+    const comp = this.app.composition;
+    const pairs = (colorBy === "author" || colorBy === "cohort") && comp.ready(colorBy) ? comp.of(f.pathId) : undefined;
+    if (pairs) {
+      // The file's bands, largest first.
+      let total = 0;
+      for (let j = 1; j < pairs.length; j += 2) total += pairs[j];
+      const rows: [number, number][] = [];
+      for (let j = 0; j < pairs.length; j += 2) rows.push([pairs[j], pairs[j + 1]]);
+      rows.sort((a, b) => b[1] - a[1]);
+      for (const [k, v] of rows.slice(0, 6)) box.append(tipRow(comp.color(k), `${Math.round((v / total) * 100)}%`, `${comp.label(k)} (${fmt.int(v)} lines)`));
+      if (rows.length > 6) box.append(h("div", { class: "sub", text: `and ${rows.length - 6} more` }));
+    } else if (f.topAuthor >= 0) {
       const name = this.app.authorName(f.topAuthor);
       box.append(tipRow(colorMaps.author.color(name), `${Math.round(f.topShare * 100)}%`, `written by ${name}`));
     }
