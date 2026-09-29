@@ -6,6 +6,7 @@ import { bucketOfLabel, cohortColor, cohortRange, cohortUnit } from "../model/sl
 import type { Painter } from "../paint/painter";
 import type { AreaSlice } from "../state/store";
 import { palette } from "../theme";
+import { clipSelect } from "../ui/controls";
 import { fmt, h, icon } from "../ui/dom";
 import { tipRow, tooltip } from "../ui/tooltip";
 import { TimeStrip } from "./timestrip";
@@ -71,6 +72,7 @@ export class AreaView extends View {
   private sliceSel: HTMLSelectElement;
   private modeSel: HTMLSelectElement;
   private extraSel: HTMLSelectElement;
+  private clipSel: HTMLSelectElement;
 
   constructor(private app: App) {
     super("area", "Repository size");
@@ -98,9 +100,12 @@ export class AreaView extends View {
     });
     const tableBtn = h("button", { class: "btn icon", title: "Table view", "aria-label": "Table view" }, icon("table"));
     tableBtn.addEventListener("click", () => this.toggleTable(tableBtn));
+    // Clipping only applies to added / deleted (syncControls shows it there).
+    this.clipSel = clipSelect(app.store, "areaClampPct", "bars");
     this.addControl(this.sliceSel);
     this.addControl(this.extraSel);
     this.addControl(this.modeSel);
+    this.addControl(this.clipSel);
     this.addControl(tableBtn);
     this.syncControls();
     app.store.watch(
@@ -110,7 +115,7 @@ export class AreaView extends View {
         this.refetch();
       },
     );
-    app.store.watch((s) => [s.cursor, s.compare, s.search?.steps.length, s.settings.theme, s.settings.diffColors, s.settings.clampPct], () => this.invalidate());
+    app.store.watch((s) => [s.cursor, s.compare, s.search?.steps.length, s.settings.theme, s.settings.diffColors, s.settings.areaClampPct], () => this.invalidate());
   }
 
   private syncControls() {
@@ -121,11 +126,12 @@ export class AreaView extends View {
       st.areaSlice === "cohort"
         ? [["auto", "auto"], ["year", "per year"], ["quarter", "per quarter"], ["month", "per month"]]
         : st.areaSlice === "dir"
-          ? [["1", "depth 1"], ["2", "depth 2"], ["3", "depth 3"]]
+          ? Array.from({ length: 6 }, (_, i): [string, string] => [String(i + 1), `depth ${i + 1}`])
           : [];
     this.extraSel.replaceChildren(...opts.map(([v, t]) => h("option", { value: v, text: t })));
     this.extraSel.style.display = opts.length ? "" : "none";
     this.extraSel.value = st.areaSlice === "cohort" ? st.cohortUnit : String(st.areaDepth);
+    this.clipSel.style.display = st.areaMode === "flow" ? "" : "none";
     const title = this.head.querySelector("h2")!;
     title.textContent = st.areaMode === "size" ? `Repository size by ${SLICE_LABEL[st.areaSlice]}` : `Lines added / deleted by ${SLICE_LABEL[st.areaSlice]}`;
   }
@@ -311,7 +317,7 @@ export class AreaView extends View {
       }
     }
     if (d.mode === "flow") {
-      const pct = this.app.store.get().settings.clampPct;
+      const pct = this.app.store.get().settings.areaClampPct;
       const ups: number[] = [];
       const downs: number[] = [];
       for (let i = d.firstBin; i <= d.lastBin; i++) {
@@ -336,7 +342,7 @@ export class AreaView extends View {
 
   protected staticKey(): string | null {
     const s = this.app.store.get();
-    return `${this.data?.key}|${this.isolated}|${s.settings.clampPct}|${s.search?.q}|${s.search?.steps.length}|${this.width}x${this.height}`;
+    return `${this.data?.key}|${this.isolated}|${s.settings.areaClampPct}|${s.search?.q}|${s.search?.steps.length}|${this.width}x${this.height}`;
   }
 
   protected drawOverlay(p: Painter) {

@@ -3,6 +3,7 @@ import { type CommitRow, api, col, filterParams } from "../api/client";
 import type { App } from "../app";
 import type { Painter } from "../paint/painter";
 import { palette } from "../theme";
+import { clipSelect, settingSelect } from "../ui/controls";
 import { fmt, h, icon } from "../ui/dom";
 import { tipRow, tooltip } from "../ui/tooltip";
 import { TimeStrip } from "./timestrip";
@@ -37,6 +38,11 @@ export class BarsView extends View {
     this.strip = new TimeStrip(app, { left: 52, right: 12, top: 16, bottom: 20 });
     const tableBtn = h("button", { class: "btn icon", title: "Table view", "aria-label": "Table view" }, icon("table"));
     tableBtn.addEventListener("click", () => this.toggleTable(tableBtn));
+    this.addControl(settingSelect(app.store, "barScale", [["linear", "linear scale"], ["sqrt", "sqrt scale"], ["log", "log scale"]], {
+      label: "Bar scale",
+      title: "Compress tall bars so small commits stay visible",
+    }));
+    this.addControl(clipSelect(app.store, "clampPct", "area chart's added / deleted mode"));
     this.addControl(tableBtn);
     const s = app.store;
     s.watch((st) => [st.brush, st.settings.axis, st.filterRev], () => this.refetch());
