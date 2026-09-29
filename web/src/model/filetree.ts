@@ -40,6 +40,8 @@ export interface FileRec {
   binary: boolean;
   /** Last step that changed this file (-1 unknown). */
   touched: number;
+  /** Last step that changed its content (a pure move keeps its source's; -1 unknown). */
+  edited: number;
   lastAdds: number;
   lastDels: number;
 }
@@ -167,10 +169,11 @@ export class FileTree {
     const share = col(t, "top_share");
     const bin = boolCol(t, "binary");
     const touched = col(t, "touched", -1);
+    const edited = col(t, "edited", -1);
     for (let i = 0; i < id.length; i++) {
       this.set({
         pathId: id[i], lines: lines[i], bytes: bytes[i], mot: mot[i], topAuthor: top[i], topShare: share[i],
-        binary: bin[i] === 1, touched: touched[i], lastAdds: 0, lastDels: 0,
+        binary: bin[i] === 1, touched: touched[i], edited: edited[i], lastAdds: 0, lastDels: 0,
       });
     }
     this.step = step;
@@ -199,7 +202,7 @@ export class FileTree {
       } else {
         this.set({
           pathId: pid, lines: ev.lines[i], bytes: ev.bytes[i], mot: ev.mot[i], topAuthor: ev.top[i],
-          topShare: ev.share[i], binary: ev.binary[i] === 1, touched: ev.step[i],
+          topShare: ev.share[i], binary: ev.binary[i] === 1, touched: ev.step[i], edited: ev.edited[i],
           lastAdds: ev.adds[i], lastDels: ev.dels[i],
         });
       }
@@ -238,6 +241,7 @@ export interface DecodedEvents {
   share: Float64Array;
   binary: Uint8Array;
   oldPath: Float64Array;
+  edited: Float64Array;
 }
 
 export function decodeEvents(t: Table): DecodedEvents {
@@ -255,6 +259,7 @@ export function decodeEvents(t: Table): DecodedEvents {
     share: col(t, "top_share"),
     binary: boolCol(t, "binary"),
     oldPath: col(t, "old_path_id", -1),
+    edited: col(t, "edited", -1),
   };
 }
 

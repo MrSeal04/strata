@@ -6,7 +6,7 @@ export type BarScale = "linear" | "sqrt" | "log";
 export type AreaSlice = "dir" | "lang" | "author" | "cohort";
 export type AreaMode = "size" | "flow";
 export type TreeLayout = "force" | "radial" | "sunburst" | "icicle";
-export type ColorBy = "lang" | "dir" | "author" | "cohort" | "heat";
+export type ColorBy = "lang" | "dir" | "author" | "cohort" | "edited" | "heat";
 
 export interface Settings {
   axis: AxisMode;

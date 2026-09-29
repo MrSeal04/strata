@@ -56,7 +56,7 @@ export class CompareCache {
       const treeA = new FileTree(this.paths);
       const treeB = new FileTree(this.paths);
       const rec = (pathId: number, lines: number) => ({
-        pathId, lines, bytes: 0, mot: 0, topAuthor: -1, topShare: 0, binary: false, touched: -1, lastAdds: 0, lastDels: 0,
+        pathId, lines, bytes: 0, mot: 0, topAuthor: -1, topShare: 0, binary: false, touched: -1, edited: -1, lastAdds: 0, lastDels: 0,
       });
       for (let i = 0; i < id.length; i++) {
         linesA.set(id[i], la[i]);

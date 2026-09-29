@@ -17,7 +17,7 @@ function paths(list: [number, string, number][]) {
 }
 
 const rec = (pathId: number, lines: number) => ({
-  pathId, lines, bytes: 0, mot: 0, topAuthor: -1, topShare: 0, binary: false, touched: -1, lastAdds: 0, lastDels: 0,
+  pathId, lines, bytes: 0, mot: 0, topAuthor: -1, topShare: 0, binary: false, touched: -1, edited: -1, lastAdds: 0, lastDels: 0,
 });
 
 describe("FileTree", () => {
@@ -55,12 +55,15 @@ describe("FileTree", () => {
       share: new Float64Array(3),
       binary: new Uint8Array(3),
       oldPath: Float64Array.from([-1, 0, -1]),
+      edited: Float64Array.from([3, 1, 5]),
     };
     const next = t.applyEvents(ev, 0, 4);
     expect(next).toBe(2);
     expect(t.files.has(0)).toBe(false);
     expect(t.files.get(3)!.lines).toBe(11);
     expect(t.renames.get("src/c.rs")).toBe("src/a.rs");
+    // The server's `edited` rides along (a pure move keeps its source's last edit).
+    expect(t.files.get(3)!.edited).toBe(1);
     t.applyEvents(ev, next, 5);
     expect(t.root.value).toBe(15);
   });

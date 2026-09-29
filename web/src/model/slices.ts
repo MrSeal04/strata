@@ -1,6 +1,7 @@
 // What a file "is" under each way of slicing the repo (directory, language, author, cohort),
 // and the one color for it, so the treemap, the tree, the legends and the area chart agree.
 
+import { interpolateTurbo } from "d3";
 import type { App } from "../app";
 import { clock } from "../clock";
 import type { ColorBy } from "../state/store";
@@ -134,6 +135,31 @@ function dirColor(app: App, pathId: number): string {
   return c;
 }
 
+/**
+ * "Last edited": a thermal ramp on a log time scale, red for just edited through yellow and
+ * green to blue for long ago. The scale runs from an hour to the history's age at the cursor
+ * (at least a month), so a young repo still spans the ramp. 64 steps keep batches few.
+ */
+const HEAT_STEPS = 64;
+const HEAT_RAMP = Array.from({ length: HEAT_STEPS }, (_, i) => {
+  // Turbo's darkest ends vanish against the surfaces; stay inside them.
+  const c = interpolateTurbo(0.93 - (0.85 * i) / (HEAT_STEPS - 1));
+  const m = /(\d+),\s*(\d+),\s*(\d+)/.exec(c);
+  return m ? `#${[m[1], m[2], m[3]].map((v) => Number(v).toString(16).padStart(2, "0")).join("")}` : c;
+});
+const HOUR = 3600;
+
+export function heatSpan(app: App): number {
+  const s = app.store.get();
+  return Math.max(30 * 86400, app.tl.time(s.cursor) - app.tl.time(0));
+}
+
+/** Color for content last edited `ageSecs` before the cursor, on a scale spanning `spanSecs`. */
+export function heatColor(ageSecs: number, spanSecs: number): string {
+  const u = Math.log(Math.max(HOUR, ageSecs) / HOUR) / Math.log(Math.max(2 * HOUR, spanSecs) / HOUR);
+  return HEAT_RAMP[Math.max(0, Math.min(HEAT_STEPS - 1, Math.round(u * (HEAT_STEPS - 1))))];
+}
+
 /** Per-file color for a color-by mode (tree and treemap). */
 export function fileColor(app: App, node: TNode, mode: ColorBy, now: number): string {
   const pal = palette();
@@ -152,6 +178,11 @@ export function fileColor(app: App, node: TNode, mode: ColorBy, now: number): st
       const unit = cohortUnit(app);
       const [first, last] = cohortRange(app, unit);
       return cohortColor(bucketOfMonth(monthIndex(f.mot), unit), first, last);
+    }
+    case "edited": {
+      if (f.edited < 0) return pal.other;
+      const cur = app.store.get().cursor;
+      return heatColor(app.tl.time(cur) - app.tl.time(Math.min(cur, f.edited)), heatSpan(app));
     }
     case "heat": {
       const k = heat(app, f.touched, now);
@@ -191,5 +222,6 @@ export const COLOR_BY_LABEL: Record<ColorBy, string> = {
   lang: "language",
   author: "author",
   cohort: "when written",
+  edited: "last edited",
   heat: "recent activity",
 };

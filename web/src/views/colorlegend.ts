@@ -1,8 +1,8 @@
 import type { App } from "../app";
 import { colorMaps } from "../model/colors";
-import { bucketLabel, cohortColor, cohortRange, cohortUnit } from "../model/slices";
+import { bucketLabel, cohortColor, cohortRange, cohortUnit, heatColor, heatSpan } from "../model/slices";
 import { palette } from "../theme";
-import { h } from "../ui/dom";
+import { fmt, h } from "../ui/dom";
 
 /** Legend for the tree/treemap color-by mode (identity is never color-alone). */
 export function renderColorLegend(app: App, el: HTMLElement) {
@@ -54,6 +54,19 @@ export function renderColorLegend(app: App, el: HTMLElement) {
       const buckets = Array.from({ length: n }, (_, i) => Math.round(first + ((last - first) * i) / Math.max(1, n - 1)));
       el.replaceChildren(
         ...[...new Set(buckets)].map((b, i, all) => item(cohortColor(b, first, last), `${bucketLabel(b, unit)}${i === 0 ? " (oldest)" : i === all.length - 1 ? " (newest)" : ""}`)),
+      );
+      break;
+    }
+    case "edited": {
+      // Ticks along the log scale, ending with the scale's far end (the history's age).
+      const span = heatSpan(app);
+      const D = 86400;
+      const ticks: [number, string][] = [[3600, "just now"], [D, "1 day"], [7 * D, "1 week"], [30.4 * D, "1 month"], [182 * D, "6 months"], [365.25 * D, "1 year"], [2 * 365.25 * D, "2 years"], [5 * 365.25 * D, "5 years"], [10 * 365.25 * D, "10 years"]];
+      const shown = ticks.filter(([t]) => t < span * 0.8);
+      el.replaceChildren(
+        ...shown.map(([t, label]) => item(heatColor(t, span), label)),
+        item(heatColor(span, span), `${fmt.ago(span)} ago`),
+        item(pal.other, "unknown"),
       );
       break;
     }

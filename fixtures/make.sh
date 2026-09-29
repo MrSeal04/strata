@@ -128,4 +128,33 @@ as "Alice Example" "alice@example.com" git tag -a v2.0 -m "release 2.0"
 git rm -q vendor/thing/thing.js
 commit "drop vendored thing"
 
+########################################################################
+# moves: last-edit tracking through chains of pure moves, a binary edit, a rename with an edit,
+# an empty file, and a path deleted then re-created.
+mkdir "$OUT/moves" && cd "$OUT/moves"
+git init -q -b main
+mkdir -p a
+lines one 6 > a/one.txt
+lines two 4 > a/two.txt
+printf 'GIF89a\x00\x01binary\x00' > a/pic.gif
+: > empty.txt
+commit "start"
+echo "more" >> a/two.txt
+commit "edit two"
+git mv a b
+commit "move a/ -> b/"
+git mv b c
+commit "move b/ -> c/"
+printf 'GIF89a\x00\x02binary2\x00' > c/pic.gif
+commit "edit the picture"
+git mv c/one.txt c/uno.txt
+echo "extra" >> c/uno.txt
+commit "rename one -> uno with an edit"
+git rm -q c/two.txt
+commit "drop two"
+lines two-again 3 > c/two.txt
+commit "two is back"
+lines three 5 > c/three.txt
+commit "add three"
+
 echo "fixtures written to $OUT"

@@ -83,10 +83,102 @@ fn git_numstat(repo: &Path, ws: bool) -> Vec<(String, u64, u64)> {
     out
 }
 
+/// Per first-parent commit (by sha): each live path and the step that last changed its content,
+/// replayed from `git log --raw`. A move with identical content (R100) keeps its source's edit;
+/// everything else that names a path (add, modify, type change, rename with changes) edits it.
+fn git_last_edits(
+    repo: &Path,
+    gitlinks: &std::collections::HashSet<String>,
+) -> Vec<(String, HashMap<String, u32>)> {
+    let mut out: Vec<(String, HashMap<String, u32>)> = Vec::new();
+    let mut live: HashMap<String, u32> = HashMap::new();
+    let log = git(
+        repo,
+        &[
+            "log",
+            "--first-parent",
+            "-M",
+            "--raw",
+            "--format=@%H",
+            "--reverse",
+        ],
+    );
+    for line in log.lines() {
+        if let Some(sha) = line.strip_prefix('@') {
+            if let Some(last) = out.last_mut() {
+                last.1 = live.clone();
+            }
+            out.push((sha.to_string(), HashMap::new()));
+            continue;
+        }
+        let Some((meta, paths)) = line.strip_prefix(':').and_then(|l| l.split_once('\t')) else {
+            continue;
+        };
+        let step = (out.len() - 1) as u32;
+        let status = meta.split_whitespace().nth(4).unwrap_or("");
+        let paths: Vec<&str> = paths.split('\t').collect();
+        match status.chars().next() {
+            Some('R') => {
+                let from = live.remove(paths[0]);
+                let e = if status == "R100" {
+                    from.unwrap_or(step)
+                } else {
+                    step
+                };
+                live.insert(paths[1].to_string(), e);
+            }
+            Some('D') => {
+                live.remove(paths[0]);
+            }
+            _ => {
+                live.insert(paths[0].to_string(), step);
+            }
+        }
+    }
+    if let Some(last) = out.last_mut() {
+        last.1 = live;
+    }
+    for (_, m) in &mut out {
+        m.retain(|p, _| !gitlinks.contains(p));
+    }
+    out
+}
+
+/// (path_id, lines, edited) rows of a /state response.
+fn state_rows(bytes: &[u8]) -> Vec<(u32, i64, i64)> {
+    use arrow::array::{Array, Int64Array};
+    let reader =
+        arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None).unwrap();
+    let mut rows = Vec::new();
+    for batch in reader {
+        let b = batch.unwrap();
+        let get = |name: &str| {
+            let c = arrow::compute::cast(
+                b.column_by_name(name).unwrap(),
+                &arrow::datatypes::DataType::Int64,
+            )
+            .unwrap();
+            c.as_any().downcast_ref::<Int64Array>().unwrap().clone()
+        };
+        let (id, lines, edited) = (get("path_id"), get("lines"), get("edited"));
+        for i in 0..b.num_rows() {
+            let e = if edited.is_null(i) {
+                -1
+            } else {
+                edited.value(i)
+            };
+            rows.push((id.value(i) as u32, lines.value(i), e));
+        }
+    }
+    rows
+}
+
 fn extract(layout: &Layout, repo: &Path) -> String {
     let src = Source::parse(repo.to_str().unwrap()).unwrap();
     let opts = ExtractOptions {
         threads: 3,
+        // Keyframes every few steps, so state reconstruction from keyframes is exercised too.
+        keyframe_min_rows: 1,
         ..Default::default()
     };
     let meta = extract_source(
@@ -222,7 +314,72 @@ fn check_repo(name: &str) {
         "{name}: surviving lines per author differ from git blame"
     );
 
-    // 5. The query endpoints run.
+    // 5. At every step, /state (keyframe + later changes) holds exactly the live files, with the
+    //    line counts of a changes-only replay and each file's last content edit as git sees it.
+    let gitlinks: std::collections::HashSet<String> =
+        git(&repo, &["log", "--all", "--raw", "--format="])
+            .lines()
+            .filter(|l| l.starts_with(':') && l.contains("160000"))
+            .filter_map(|l| l.split('\t').next_back().map(str::to_string))
+            .collect();
+    let (paths, shas): (HashMap<u32, String>, HashMap<String, u32>) = db
+        .with(&id, |c, s| {
+            let mut stmt = c.prepare(&format!("SELECT path_id, path FROM {s}.paths"))?;
+            let paths = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<_, _>>()?;
+            let mut stmt = c.prepare(&format!("SELECT sha, step FROM {s}.steps"))?;
+            let shas = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<_, _>>()?;
+            Ok((paths, shas))
+        })
+        .unwrap();
+    let keyframes: i64 = db
+        .with(&id, |c, s| {
+            Ok(
+                c.query_row(&format!("SELECT count(*) FROM {s}.kf_steps"), [], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    // (kitchen never has 2 × its live files in changes between keyframes, so it has none)
+    assert!(
+        keyframes > 0 || name == "kitchen",
+        "{name}: no keyframes, so the keyframe path goes untested"
+    );
+    for (sha, want) in git_last_edits(&repo, &gitlinks) {
+        let step = shas[&sha];
+        let rows = state_rows(&db.state(&id, step, &Filters::default()).unwrap());
+        let lines: HashMap<u32, i64> = db
+            .with(&id, |c, s| {
+                let mut stmt = c.prepare(&state_sql_for_test(s, step))?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, i64>(1)?)))?;
+                Ok(rows.collect::<Result<_, _>>()?)
+            })
+            .unwrap();
+        let got: HashMap<String, u32> = rows
+            .iter()
+            .filter(|(p, _, _)| !gitlinks.contains(&paths[p]))
+            .map(|(p, _, e)| (paths[p].clone(), *e as u32))
+            .collect();
+        assert_eq!(
+            got, want,
+            "{name}: last edits at step {step} differ from git"
+        );
+        for (p, l, _) in &rows {
+            assert_eq!(
+                Some(l),
+                lines.get(p),
+                "{name}: lines of {} at step {step}",
+                paths[p]
+            );
+        }
+    }
+
+    // 6. The query endpoints run.
     let f = Filters {
         exclude: vec![4, 5, 6, 7],
         ..Default::default()
@@ -282,6 +439,11 @@ fn linear_matches_git() {
 #[test]
 fn kitchen_matches_git() {
     check_repo("kitchen");
+}
+
+#[test]
+fn moves_matches_git() {
+    check_repo("moves");
 }
 
 #[test]

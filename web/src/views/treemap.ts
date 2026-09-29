@@ -3,7 +3,7 @@ import type { App } from "../app";
 import { clock } from "../clock";
 import { colorMaps, inkOn } from "../model/colors";
 import { type FileTree, type TNode, stableChildren } from "../model/filetree";
-import { COLOR_BY_LABEL, assignDirColors, cohortUnit, fileColor, growthColor, heat } from "../model/slices";
+import { COLOR_BY_LABEL, assignDirColors, cohortUnit, fileColor, growthColor, heat, heatColor, heatSpan } from "../model/slices";
 import { GlRects } from "../paint/glrects";
 import type { Painter } from "../paint/painter";
 import type { ColorBy } from "../state/store";
@@ -94,7 +94,9 @@ export class TreemapView extends View {
     this.addControl(this.modeSel);
     app.store.watch((s) => [s.cursor, s.settings.colorBy, s.search?.paths.size, s.settings.theme, s.settings.diffColors, s.settings.areaDepth, s.settings.cohortUnit], () => this.invalidate());
     const legend = () => renderColorLegend(app, this.legend);
-    app.store.watch((s) => [s.settings.colorBy, s.compare, s.langs, s.authors, s.root, s.settings.areaDepth, s.settings.cohortUnit, s.settings.theme, s.settings.diffColors], legend, true);
+    // (the last-edited scale stretches with the history's age at the cursor)
+    const spanKey = (s: { settings: { colorBy: string } }) => (s.settings.colorBy === "edited" ? Math.round(Math.log(heatSpan(app)) * 8) : 0);
+    app.store.watch((s) => [s.settings.colorBy, s.compare, s.langs, s.authors, s.root, s.settings.areaDepth, s.settings.cohortUnit, s.settings.theme, s.settings.diffColors, spanKey(s)], legend, true);
     colorMaps.dir.onChange(() => {
       if (app.store.get().settings.colorBy === "dir") legend();
     });
@@ -254,7 +256,9 @@ export class TreemapView extends View {
     const comparing = !!(s.compare && this.app.compare.data);
     // Nothing moved and no color input changed: reuse last frame's batches; only the activity
     // rings (a few recently touched files) are recomputed. Most playback frames at scale.
-    const sliceKey = colorBy === "dir" ? `${s.settings.areaDepth}:${colorMaps.dir.version}` : colorBy === "cohort" ? cohortUnit(this.app) : colorBy === "heat" ? pos : "";
+    const sliceKey = colorBy === "dir" ? `${s.settings.areaDepth}:${colorMaps.dir.version}` : colorBy === "cohort" ? cohortUnit(this.app) : colorBy === "heat" ? pos : colorBy === "edited" ? s.cursor : "";
+    // Activity rings on just-touched files, except where the colors already say it.
+    const ringsOn = colorBy !== "heat" && colorBy !== "edited";
     const colorKey = `${this.layoutKey}|${colorBy}|${s.settings.theme}|${s.settings.diffColors}|${comparing}|${this.app.compare.data?.key ?? ""}|${s.search?.q ?? ""}|${sliceKey}`;
     const reuse = !this.geomMoving && k < 1 && this.frame?.key === colorKey;
     let geom = false;
@@ -264,7 +268,7 @@ export class TreemapView extends View {
     const rings: [number, number, number, number, string, number][] = [];
     if (reuse && this.frame) {
       ({ dirs, groups, labels } = this.frame);
-      if (!comparing && colorBy !== "heat") {
+      if (!comparing && ringsOn) {
         const seenRing = new Set<number>();
         for (let i = this.app.tree.recent.length - 1; i >= 0; i--) {
           const pid = this.app.tree.recent[i];
@@ -332,7 +336,7 @@ export class TreemapView extends View {
         // Activity cue in every mode: a brief ring on files touched right now.
         if (!comparing && !rep && f.touched >= 0 && pos - f.touched < 400) {
           const ht = heat(this.app, f.touched, pos);
-          if (colorBy !== "heat" && ht > 0.15 && w > 2 && hh > 2) rings.push([r.x0 + 0.75, r.y0 + 0.75, w - 1.5, hh - 1.5, f.lastDels > f.lastAdds ? pal.del : pal.add, ht]);
+          if (ringsOn && ht > 0.15 && w > 2 && hh > 2) rings.push([r.x0 + 0.75, r.y0 + 0.75, w - 1.5, hh - 1.5, f.lastDels > f.lastAdds ? pal.del : pal.add, ht]);
           if (ht > 0.05) moving ||= s.playing;
         }
         if (!rep && w > 46 && hh > 16) labels.push([n.data.name, r.x0 + 4, r.y0 + 11, w - 8, inkOn(fill), false]);
@@ -414,6 +418,11 @@ export class TreemapView extends View {
       box.append(tipRow(colorMaps.author.color(name), `${Math.round(f.topShare * 100)}%`, `written by ${name}`));
     }
     if (f.mot > 0) box.append(tipRow(null, fmt.date(f.mot), "average line written"));
+    if (f.edited >= 0) {
+      const cur = this.app.store.get().cursor;
+      const age = this.app.tl.time(cur) - this.app.tl.time(Math.min(cur, f.edited));
+      box.append(tipRow(heatColor(age, heatSpan(this.app)), fmt.date(this.app.tl.time(f.edited)), `content last edited (${age < 86400 ? "the same day" : `${fmt.ago(age)} earlier`})`));
+    }
     if (f.touched >= 0) {
       const act = f.lastAdds || f.lastDels ? ` (+${fmt.int(f.lastAdds)} −${fmt.int(f.lastDels)})` : "";
       box.append(tipRow(f.lastDels > f.lastAdds ? pal.del : pal.add, `#${fmt.int(f.touched + 1)}`, `last changed${act}`));

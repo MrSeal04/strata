@@ -36,6 +36,8 @@ pub struct ExtractOptions {
     /// Ignore any checkpoint and re-extract everything.
     pub full: bool,
     pub checkpoint_every: Duration,
+    /// Change rows between keyframes, at least (tests lower it to get keyframes in tiny repos).
+    pub keyframe_min_rows: u64,
 }
 
 impl Default for ExtractOptions {
@@ -47,6 +49,7 @@ impl Default for ExtractOptions {
             diff: DiffOptions::default(),
             full: false,
             checkpoint_every: Duration::from_secs(120),
+            keyframe_min_rows: 50_000,
         }
     }
 }
@@ -558,6 +561,7 @@ pub fn extract(
     // Parallel diff pipeline with a bounded reorder window.
     let total = chain.ids.len() as u64;
     let threads = opts.threads.max(1);
+    let keyframe_min_rows = opts.keyframe_min_rows.max(1);
     let window = threads * 8;
     let safe = repo.clone().into_sync();
     let (job_tx, job_rx) = bounded::<(Step, ObjectId, Vec<walk::SideCommit>)>(threads * 2);
@@ -634,7 +638,9 @@ pub fn extract(
                     let out = process_step(&mut st, d)?;
                     st.rows_since_keyframe += out.changes.len() as u64;
                     sink.write_step(out)?;
-                    if st.rows_since_keyframe >= (2 * st.tracker.live_files() as u64).max(50_000) {
+                    if st.rows_since_keyframe
+                        >= (2 * st.tracker.live_files() as u64).max(keyframe_min_rows)
+                    {
                         sink.write_keyframe(next, st.tracker.keyframe(next))?;
                         st.rows_since_keyframe = 0;
                     }

@@ -765,20 +765,118 @@ impl Db {
         Ok(table)
     }
 
-    /// File state after `step`: nearest keyframe plus later changes.
+    /// File state after `step`: nearest keyframe plus later changes, with each file's last edit.
     pub fn state(&self, repo: &str, step: u32, f: &Filters) -> anyhow::Result<Vec<u8>> {
-        self.with(repo, |c, s| self.ipc_cached(c, &state_sql(s, step, f)))
+        self.with(repo, |c, s| {
+            self.ensure_rename_edits(c, s)?;
+            self.ipc_cached(c, &state_sql_edited(s, step, f))
+        })
     }
 
-    /// Change events in (from, to], for forward playback.
+    /// Build (once per loaded repo) `rename_edits`: for each pure rename (a path moved without
+    /// content changes), the step that last edited its content, carried over from the path it
+    /// came from (through chains of moves). Every other change row is an edit at its own step.
+    fn ensure_rename_edits(&self, c: &Connection, s: &str) -> anyhow::Result<()> {
+        use arrow::array::{Array, BooleanArray, UInt8Array, UInt32Array};
+        let _guard = self.agg_lock.lock().unwrap();
+        let have: i64 = c.query_row(
+            "SELECT count(*) FROM duckdb_tables() WHERE schema_name = ? AND table_name = 'rename_edits'",
+            [s],
+            |r| r.get(0),
+        )?;
+        if have > 0 {
+            return Ok(());
+        }
+        // Within a step, removals (deleted, moved away) come first, so a move's source is
+        // stashed before its destination row is read.
+        let mut stmt = c.prepare(&format!(
+            "SELECT step::UINTEGER, path_id::UINTEGER, kind::UTINYINT, coalesce(old_path_id, 0)::UINTEGER,
+                    coalesce(adds + dels > 0, false)
+             FROM {s}.changes ORDER BY step, CASE WHEN kind IN (2, 4) THEN 0 ELSE 1 END, path_id"
+        ))?;
+        let mut last: HashMap<u32, u32> = HashMap::new();
+        let mut moved: HashMap<u32, u32> = HashMap::new();
+        let mut cur = u32::MAX;
+        let mut out: Vec<(u32, u32, u32)> = Vec::new();
+        for batch in stmt.query_arrow([])? {
+            let col = |i: usize| batch.column(i).clone();
+            let (steps, paths, kinds, olds, content) = (col(0), col(1), col(2), col(3), col(4));
+            let steps = steps
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .context("step")?;
+            let paths = paths
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .context("path_id")?;
+            let kinds = kinds
+                .as_any()
+                .downcast_ref::<UInt8Array>()
+                .context("kind")?;
+            let olds = olds
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .context("old_path_id")?;
+            let content = content
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .context("content")?;
+            for i in 0..batch.num_rows() {
+                let (step, path) = (steps.value(i), paths.value(i));
+                if step != cur {
+                    moved.clear();
+                    cur = step;
+                }
+                match kinds.value(i) {
+                    2 => {
+                        last.remove(&path);
+                    }
+                    4 => {
+                        if let Some(e) = last.remove(&path) {
+                            moved.insert(path, e);
+                        }
+                    }
+                    3 if !content.value(i) => {
+                        let e = moved.get(&olds.value(i)).copied().unwrap_or(step);
+                        last.insert(path, e);
+                        out.push((step, path, e));
+                    }
+                    _ => {
+                        last.insert(path, step);
+                    }
+                }
+            }
+        }
+        // Fill a side table, then rename it: no reader ever sees it half-built.
+        c.execute_batch(&format!(
+            "DROP TABLE IF EXISTS {s}.rename_edits_tmp;
+             CREATE TABLE {s}.rename_edits_tmp (step UINTEGER, path_id UINTEGER, edited UINTEGER);"
+        ))?;
+        {
+            let mut app = c.appender_to_db("rename_edits_tmp", s)?;
+            for (step, path, edited) in out {
+                app.append_row(duckdb::params![step, path, edited])?;
+            }
+            app.flush()?;
+        }
+        c.execute_batch(&format!(
+            "ALTER TABLE {s}.rename_edits_tmp RENAME TO rename_edits;"
+        ))?;
+        Ok(())
+    }
+
+    /// Change events in (from, to], for forward playback. `edited` follows the /state rule.
     pub fn events(&self, repo: &str, from: i64, to: u32, f: &Filters) -> anyhow::Result<Vec<u8>> {
         self.with(repo, |c, s| {
+            self.ensure_rename_edits(c, s)?;
             self.ipc_cached(c, &format!(
                 "SELECT c.step::INTEGER AS step, c.path_id, c.kind, c.{a}::INTEGER AS adds, c.{d}::INTEGER AS dels,
                         c.lines_after::INTEGER AS lines, c.bytes_after::DOUBLE AS bytes,
                         c.mean_origin_time::DOUBLE AS mot, k.canonical_id AS top_author, c.top_share, c.is_binary AS binary,
-                        c.old_path_id
+                        c.old_path_id,
+                        (CASE WHEN c.kind = 3 AND c.adds + c.dels = 0 THEN coalesce(r.edited, c.step) ELSE c.step END)::INTEGER AS edited
                  FROM {s}.changes c JOIN {s}.paths p USING (path_id) LEFT JOIN {s}.canon k ON k.author_id = c.top_author
+                 LEFT JOIN {s}.rename_edits r ON r.step = c.step AND r.path_id = c.path_id
                  WHERE c.step > {from} AND c.step <= {to} AND {pp}
                  ORDER BY c.step, CASE WHEN c.kind IN (2, 4) THEN 0 ELSE 1 END, c.path_id",
                 a = f.adds(), d = f.dels(), pp = f.path_pred(),
@@ -919,6 +1017,24 @@ impl Db {
             ))
         })
     }
+}
+
+/// `state_sql` plus `edited`: the step that last changed each file's content. Every change row
+/// is an edit at its own step except a pure rename, which carries its source's (`rename_edits`).
+/// One aggregate over all changes up to `step`: about 20 ms at Linux's HEAD (1.7M rows).
+/// (`rename_edits` has one row per (step, path_id), and the CASE picks it only for a rename.
+/// A left-only term in the ON clause, like `AND c.kind = 3`, made this join 250× slower.)
+fn state_sql_edited(s: &str, step: u32, f: &Filters) -> String {
+    format!(
+        "WITH st AS ({state}),
+         ed AS (SELECT c.path_id,
+                       arg_max(CASE WHEN c.kind = 3 AND c.adds + c.dels = 0 THEN coalesce(r.edited, c.step) ELSE c.step END,
+                               c.step::BIGINT * 8 + CASE WHEN c.kind IN (2, 4) THEN 1 ELSE 2 END)::INTEGER AS edited
+                FROM {s}.changes c LEFT JOIN {s}.rename_edits r ON r.step = c.step AND r.path_id = c.path_id
+                WHERE c.step <= {step} GROUP BY c.path_id)
+         SELECT st.*, ed.edited FROM st LEFT JOIN ed USING (path_id)",
+        state = state_sql(s, step, f),
+    )
 }
 
 fn state_sql(s: &str, step: u32, f: &Filters) -> String {

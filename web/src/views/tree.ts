@@ -2,7 +2,7 @@ import { type HierarchyNode, type HierarchyRectangularNode, hierarchy, partition
 import type { App } from "../app";
 import { colorMaps } from "../model/colors";
 import { TNode, stableChildren } from "../model/filetree";
-import { fileColor, heat } from "../model/slices";
+import { fileColor, heat, heatSpan } from "../model/slices";
 import { CanvasPainter } from "../paint/canvas";
 import type { Painter } from "../paint/painter";
 import type { TreeLayout } from "../state/store";
@@ -117,7 +117,9 @@ export class TreeView extends View {
     });
     app.store.watch((s) => [s.cursor, s.settings.colorBy, s.search?.paths.size, s.settings.actors, s.settings.theme, s.settings.areaDepth, s.settings.cohortUnit], () => this.invalidate());
     const legend = () => renderColorLegend(app, this.legend);
-    app.store.watch((s) => [s.settings.colorBy, s.compare, s.langs, s.authors, s.root, s.settings.areaDepth, s.settings.cohortUnit, s.settings.theme, s.settings.diffColors], legend, true);
+    // (the last-edited scale stretches with the history's age at the cursor)
+    const spanKey = (s: { settings: { colorBy: string } }) => (s.settings.colorBy === "edited" ? Math.round(Math.log(heatSpan(app)) * 8) : 0);
+    app.store.watch((s) => [s.settings.colorBy, s.compare, s.langs, s.authors, s.root, s.settings.areaDepth, s.settings.cohortUnit, s.settings.theme, s.settings.diffColors, spanKey(s)], legend, true);
     // The treemap hands out directory colors as it lays out; repaint when it does.
     colorMaps.dir.onChange(() => {
       if (app.store.get().settings.colorBy !== "dir") return;
@@ -420,7 +422,7 @@ export class TreeView extends View {
           }
         }
         const ht = v.t.file ? heat(this.app, v.t.file.touched, pos) : 0;
-        if (ht > 0.2 && colorBy !== "heat") moving ||= s.playing;
+        if (ht > 0.2 && colorBy !== "heat" && colorBy !== "edited") moving ||= s.playing;
       }
     } else {
       // Edges batched by parent fan-out: wide fans get fainter so they don't read as solid wedges.
@@ -475,7 +477,7 @@ export class TreeView extends View {
         const fill = fileColor(this.app, v.t, colorBy, pos);
         const alpha = searchPaths && !searchPaths.has(f.pathId) ? 0.15 : 1;
         const ht = heat(this.app, f.touched, pos);
-        if (ht > 0.05 && colorBy !== "heat") {
+        if (ht > 0.05 && colorBy !== "heat" && colorBy !== "edited") {
           p.circle(g.x, g.y, r + 5 * ht, f.lastDels > f.lastAdds ? pal.del : pal.add, 0.35 * ht);
           moving ||= s.playing;
         }
