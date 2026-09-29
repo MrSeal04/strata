@@ -7,7 +7,7 @@ import { CompareCache } from "../model/compare";
 import { Composition } from "../model/composition";
 import { FileTree, Paths } from "../model/filetree";
 import { StateSync } from "../model/sync";
-import { DEFAULT_SETTINGS, Store, initialState, loadSettings, saveSettings } from "../state/store";
+import { DEFAULT_SETTINGS, Store, initialState, linkShared, loadSettings, saveSettings } from "../state/store";
 import { applyTheme, onPaletteChange } from "../theme";
 import { Timeline } from "../timeline/axis";
 import { Player, runDuration } from "../timeline/playback";
@@ -35,7 +35,7 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
   const paths = new Paths(pathsT);
   const tree = new FileTree(paths);
   const steps = tl.n;
-  const settings = { ...DEFAULT_SETTINGS, ...loadSettings(repo) };
+  const settings = linkShared({ ...DEFAULT_SETTINGS, ...loadSettings(repo) }, {});
   const store = new Store({ ...initialState(), repo, steps, cursor: steps - 1, pos: steps - 1, settings });
   applyTheme(settings.theme, settings.diffColors);
   const player = new Player(store, () => tl);

@@ -22,12 +22,19 @@ export interface Settings {
   barScale: BarScale;
   /** Clip bars above this percentile (0 = off). */
   clampPct: number;
+  /** The added / deleted area chart's clip percentile (follows `clampPct` while linked). */
+  areaClampPct: number;
   areaSlice: AreaSlice;
   areaMode: AreaMode;
   areaDepth: number;
   cohortUnit: "auto" | "year" | "quarter" | "month";
   treeLayout: TreeLayout;
+  /** What the treemap's squares are colored by. */
   colorBy: ColorBy;
+  /** What the tree's nodes are colored by (follows `colorBy` while linked). */
+  treeColorBy: ColorBy;
+  /** Linked cards share one value: the tree takes the treemap's color-by, the area chart the bars' clipping. */
+  linkCards: boolean;
   /** Treemap square size: current lines, or lines added + deleted from the range start to the cursor. */
   treemapMeasure: "size" | "churn";
   /** Treemap layout: re-tiled every frame, or steady (files keep their end-of-range places). */
@@ -53,12 +60,15 @@ export const DEFAULT_SETTINGS: Settings = {
   hideBots: false,
   barScale: "sqrt",
   clampPct: 99,
+  areaClampPct: 99,
   areaSlice: "dir",
   areaMode: "size",
   areaDepth: 1,
   cohortUnit: "auto",
   treeLayout: "force",
   colorBy: "lang",
+  treeColorBy: "lang",
+  linkCards: true,
   treemapMeasure: "size",
   treemapLayout: "live",
   actors: false,
@@ -68,6 +78,21 @@ export const DEFAULT_SETTINGS: Settings = {
   diffColors: "bluered",
   heatSeconds: 1.5,
 };
+
+/**
+ * Linked cards share one value per pair (treemap and tree color-by, bars and area clipping). A
+ * patch that sets only the tree's (or the area's) side moves both; anything else, including
+ * turning the link on, copies the treemap's (or the bars') value over.
+ */
+export function linkShared(s: Settings, patch: Partial<Settings>): Settings {
+  if (!s.linkCards) return s;
+  const out = { ...s };
+  if ("treeColorBy" in patch && !("colorBy" in patch)) out.colorBy = out.treeColorBy;
+  else out.treeColorBy = out.colorBy;
+  if ("areaClampPct" in patch && !("clampPct" in patch)) out.clampPct = out.areaClampPct;
+  else out.areaClampPct = out.clampPct;
+  return out;
+}
 
 export interface Compare {
   a: number;
@@ -127,7 +152,7 @@ export class Store {
 
   setSettings(patch: Partial<Settings>) {
     const prev = this.s.settings;
-    const settings = { ...prev, ...patch };
+    const settings = linkShared({ ...prev, ...patch }, patch);
     const refetch: (keyof Settings)[] = ["exclude", "ws", "hideBots"];
     const bump = refetch.some((k) => k in patch && JSON.stringify(patch[k]) !== JSON.stringify(prev[k]));
     this.set({ settings, ...(bump ? { filterRev: this.s.filterRev + 1 } : {}) });
