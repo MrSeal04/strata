@@ -4,7 +4,10 @@ import type { Settings } from "../state/store";
 import { fmt, h, icon } from "./dom";
 import { popover } from "./popover";
 
-/** Settings panel: every toggle from the plan in one place. */
+/**
+ * Settings panel: only what applies to the whole dashboard. Each card's own options sit in its
+ * header, and playback in the transport bar.
+ */
 export function openSettings(app: App, anchor: HTMLElement) {
   const store = app.store;
   const s = store.get().settings;
@@ -13,16 +16,7 @@ export function openSettings(app: App, anchor: HTMLElement) {
   const select = <K extends keyof Settings>(key: K, opts: [string, string][]) => {
     const el = h("select", {}, ...opts.map(([v, t]) => h("option", { value: v, text: t })));
     el.value = String(s[key]);
-    el.addEventListener("change", () => {
-      const v = el.value;
-      store.setSettings({ [key]: (typeof s[key] === "number" ? Number(v) : v) as Settings[K] } as Partial<Settings>);
-    });
-    return el;
-  };
-  const num = <K extends keyof Settings>(key: K, min: number, max: number, step = 1) => {
-    const el = h("input", { type: "number", min: String(min), max: String(max), step: String(step), style: "width:84px" });
-    el.value = String(s[key]);
-    el.addEventListener("change", () => store.setSettings({ [key]: Math.max(min, Math.min(max, Number(el.value) || min)) } as Partial<Settings>));
+    el.addEventListener("change", () => store.setSettings({ [key]: el.value } as Partial<Settings>));
     return el;
   };
   const check = <K extends keyof Settings>(key: K) => {
@@ -34,28 +28,8 @@ export function openSettings(app: App, anchor: HTMLElement) {
   const body = h("div", {},
     h("h3", { text: "Timeline" }),
     row("Axis", select("axis", [["index", "commit index"], ["time", "calendar time"]]), "Commit index gives every commit equal width; calendar time shows real pace"),
-    row("Playback", select("playMode", [["fixed", "fixed total length"], ["commits", "commits per second"], ["calendar", "days per second"]])),
-    row("Run length (s)", num("fixedSeconds", 1, 3600)),
-    row("Commits / second", num("commitsPerSec", 0.1, 100000, 0.1)),
-    row("Days / second", num("daysPerSec", 0.01, 36500, 0.01)),
-    row("Loop", check("loop")),
-    h("h3", { text: "Bars" }),
-    row("Scale", select("barScale", [["linear", "linear"], ["sqrt", "square root"], ["log", "log"]]), "Compress tall bars so small commits stay visible"),
-    row("Clip outliers above", select("clampPct", [["0", "off"], ["95", "95th percentile"], ["99", "99th percentile"], ["99.9", "99.9th percentile"]]), "Also the added / deleted area chart. Clipped bars and bins get a ▲ marker; the true value is in the tooltip"),
-    row("Ignore whitespace", check("ws")),
-    row("Hide bots", check("hideBots")),
-    h("h3", { text: "Stacked area" }),
-    row("Slice by", select("areaSlice", [["dir", "directory"], ["lang", "language"], ["author", "author"], ["cohort", "year written"]])),
-    row("Mode", select("areaMode", [["size", "size"], ["flow", "added / deleted"]])),
-    row("Directory depth", num("areaDepth", 1, 6)),
-    row("Cohort unit", select("cohortUnit", [["auto", "auto"], ["year", "year"], ["quarter", "quarter"], ["month", "month"]])),
-    h("h3", { text: "Tree and treemap" }),
-    row("Tree layout", select("treeLayout", [["force", "force-directed"], ["radial", "radial tree"], ["sunburst", "sunburst"], ["icicle", "icicle"]])),
-    row("Color by", select("colorBy", [["dir", "directory"], ["lang", "language"], ["author", "author"], ["cohort", "when written"], ["heat", "recent activity"]])),
-    row("Author actors", check("actors"), "Gource-style: authors fly to the files they touch (radial / force layouts)"),
-    row("Gravatar images", check("gravatar"), "Loads avatars from gravatar.com using a SHA-256 hash of each email (off by default)"),
-    row("Node budget", num("nodeBudget", 200, 50000, 100), "Deeper folders collapse above this many nodes"),
-    row("Activity highlight (s)", num("heatSeconds", 0.2, 20, 0.1)),
+    h("h3", { text: "Cards" }),
+    row("Link shared options", check("linkCards"), "On: the tree colors like the treemap, and the added / deleted area clips outliers like the bars. Off: each card keeps its own."),
     h("h3", { text: "Display" }),
     row("Theme", select("theme", [["auto", "match system"], ["light", "light"], ["dark", "dark"]])),
     row("Add / delete colors", select("diffColors", [["bluered", "blue / red (colorblind-safe)"], ["greenred", "green / red (classic)"]])),
