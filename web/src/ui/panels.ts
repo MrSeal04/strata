@@ -41,7 +41,7 @@ export function openSettings(app: App, anchor: HTMLElement) {
     row("Loop", check("loop")),
     h("h3", { text: "Bars" }),
     row("Scale", select("barScale", [["linear", "linear"], ["sqrt", "square root"], ["log", "log"]]), "Compress tall bars so small commits stay visible"),
-    row("Clip outliers above", select("clampPct", [["0", "off"], ["95", "95th percentile"], ["99", "99th percentile"], ["99.9", "99.9th percentile"]]), "Clipped bars get a ▲ marker; the true value is in the tooltip"),
+    row("Clip outliers above", select("clampPct", [["0", "off"], ["95", "95th percentile"], ["99", "99th percentile"], ["99.9", "99.9th percentile"]]), "Also the added / deleted area chart. Clipped bars and bins get a ▲ marker; the true value is in the tooltip"),
     row("Ignore whitespace", check("ws")),
     row("Hide bots", check("hideBots")),
     h("h3", { text: "Stacked area" }),

@@ -32,6 +32,27 @@ interface AreaData {
   series: Series[];
 }
 
+/**
+ * Flow bins are this many px wide. Size is a level and bins every 2 px, but flow sums churn per
+ * bin: at 2 px Linux's merge windows make neighbouring bins differ ~4x and the stack reads as a
+ * comb, with the median bin at 3% of the 99th percentile. At 6-10 px it is 27-34%.
+ */
+const FLOW_BIN_PX = 8;
+
+/**
+ * Scale end for per-bin flow totals: their `pct` percentile when the peaks above it are outliers
+ * (over 1.5x it), else the max. Linux's initial import alone is 5x the 99th percentile. The
+ * percentile takes the value below rather than interpolating: on a phone there are ~40 bins, and
+ * interpolating pulls the 99th most of the way up to the outlier.
+ */
+function clipLevel(totals: number[], pct: number): number {
+  const vals = totals.filter((v) => v > 0).sort((a, b) => a - b);
+  const max = vals.length ? vals[vals.length - 1] : 0;
+  if (!pct || pct >= 100 || vals.length < 20) return max;
+  const q = vals[Math.floor((pct / 100) * (vals.length - 1))];
+  return max > 1.5 * q ? q : max;
+}
+
 const SLICE_LABEL: Record<AreaSlice, string> = {
   dir: "directory",
   lang: "language",
@@ -89,7 +110,7 @@ export class AreaView extends View {
         this.refetch();
       },
     );
-    app.store.watch((s) => [s.cursor, s.compare, s.search?.steps.length, s.settings.theme, s.settings.diffColors], () => this.invalidate());
+    app.store.watch((s) => [s.cursor, s.compare, s.search?.steps.length, s.settings.theme, s.settings.diffColors, s.settings.clampPct], () => this.invalidate());
   }
 
   private syncControls() {
@@ -118,7 +139,8 @@ export class AreaView extends View {
     if (!s.repo || this.width < 10) return;
     const [a, b] = this.strip.update(this.width);
     const st = s.settings;
-    const bins = Math.max(2, Math.min(Math.floor(this.strip.plotW / 2), st.axis === "index" ? b - a + 1 : 100_000));
+    const binPx = st.areaMode === "flow" ? FLOW_BIN_PX : 2;
+    const bins = Math.max(2, Math.min(Math.floor(this.strip.plotW / binPx), st.axis === "index" ? b - a + 1 : 100_000));
     const p = filterParams(s);
     p.set("axis", st.axis);
     p.set("lo", String(this.strip.lo));
@@ -262,7 +284,11 @@ export class AreaView extends View {
     }
   }
 
-  private stack(): { tops: Float64Array[]; bottoms: Float64Array[]; max: number; min: number } {
+  /**
+   * Stacked layer edges, plus the scale's ends. In flow mode those are clipped at outliers
+   * (`clipLevel`); `upTot`/`downTot` (deletions negative) show which bins go past them.
+   */
+  private stack(): { tops: Float64Array[]; bottoms: Float64Array[]; max: number; min: number; upTot: Float64Array; downTot: Float64Array } {
     const d = this.data!;
     const n = d.bins;
     const tops: Float64Array[] = [];
@@ -284,11 +310,23 @@ export class AreaView extends View {
         bottoms.push(Float64Array.from(accDown));
       }
     }
-    for (let i = d.firstBin; i <= d.lastBin; i++) {
-      max = Math.max(max, accUp[i]);
-      min = Math.min(min, accDown[i]);
+    if (d.mode === "flow") {
+      const pct = this.app.store.get().settings.clampPct;
+      const ups: number[] = [];
+      const downs: number[] = [];
+      for (let i = d.firstBin; i <= d.lastBin; i++) {
+        ups.push(accUp[i]);
+        downs.push(-accDown[i]);
+      }
+      max = Math.max(1, clipLevel(ups, pct));
+      min = -clipLevel(downs, pct);
+    } else {
+      for (let i = d.firstBin; i <= d.lastBin; i++) {
+        max = Math.max(max, accUp[i]);
+        min = Math.min(min, accDown[i]);
+      }
     }
-    return { tops, bottoms, max, min };
+    return { tops, bottoms, max, min, upTot: accUp, downTot: accDown };
   }
 
   draw(p: Painter) {
@@ -298,7 +336,7 @@ export class AreaView extends View {
 
   protected staticKey(): string | null {
     const s = this.app.store.get();
-    return `${this.data?.key}|${this.isolated}|${s.search?.q}|${s.search?.steps.length}|${this.width}x${this.height}`;
+    return `${this.data?.key}|${this.isolated}|${s.settings.clampPct}|${s.search?.q}|${s.search?.steps.length}|${this.width}x${this.height}`;
   }
 
   protected drawOverlay(p: Painter) {
@@ -327,8 +365,21 @@ export class AreaView extends View {
       if (d) p.text("No lines in this selection", this.width / 2, this.height / 2, { color: pal.inkMuted, size: 12, align: "center" });
       return;
     }
-    const { tops, bottoms, max, min } = this.stack();
-    const y = scaleLinear().domain([min, max]).nice(4).range([bottomY, m.top]);
+    const { tops, bottoms, max, min, upTot, downTot } = this.stack();
+    // Flow's ends are clip levels; rounding them out would leave the peaks well short of them.
+    const y = scaleLinear().domain([min, max]);
+    if (d.mode === "size") y.nice(4);
+    // Bins past a clipped end get a marker in a margin beyond the cut.
+    const [y0, y1] = y.domain();
+    let cutUp = false;
+    let cutDown = false;
+    for (let i = d.firstBin; i <= d.lastBin; i++) {
+      if (upTot[i] > y1) cutUp = true;
+      if (downTot[i] < y0) cutDown = true;
+    }
+    const plotTop = m.top + (cutUp ? 9 : 0);
+    const plotBottom = bottomY - (cutDown ? 9 : 0);
+    y.range([plotBottom, plotTop]);
     for (const t of y.ticks(4)) {
       const yy = Math.round(y(t)) + 0.5;
       p.line(m.left, yy, m.left + this.strip.plotW, yy, t === 0 ? pal.axis : pal.grid, 1);
@@ -344,7 +395,7 @@ export class AreaView extends View {
     }
     const per = d.mode === "flow" ? 2 : 1;
     p.save();
-    p.clip(m.left, m.top - 1, this.strip.plotW, bottomY - m.top + 2);
+    p.clip(m.left, plotTop - 1, this.strip.plotW, plotBottom - plotTop + 2);
     d.series.forEach((s, si) => {
       for (let k = 0; k < per; k++) {
         const top = tops[si * per + k];
@@ -362,6 +413,11 @@ export class AreaView extends View {
       }
     });
     p.restore();
+    // The true totals of clipped bins are in the tooltip.
+    for (let j = 0; j < idx.length; j++) {
+      if (upTot[idx[j]] > y1) p.text("▲", xs[j], m.top + 4, { color: pal.ink, size: 8, align: "center", baseline: "middle" });
+      if (downTot[idx[j]] < y0) p.text("▼", xs[j], bottomY - 4, { color: pal.ink, size: 8, align: "center", baseline: "middle" });
+    }
     this.strip.drawSearch(p, bottomY - 5);
     this.strip.drawTags(p, m.top - 4);
     this.strip.drawXAxis(p, this.height);
@@ -384,20 +440,46 @@ export class AreaView extends View {
     }
     // One tooltip, every series at that x; value leads, name follows.
     const box = h("div");
-    const step = this.app.tl.stepAt(d.lo + (bin + 0.5) * w, this.strip.axis);
-    box.append(h("div", { class: "h", text: `${fmt.date(this.app.tl.time(step))} · #${fmt.int(step + 1)}` }));
+    const tl = this.app.tl;
+    if (d.mode === "size") {
+      const step = tl.stepAt(d.lo + (bin + 0.5) * w, this.strip.axis);
+      box.append(h("div", { class: "h", text: `${fmt.date(tl.time(step))} · #${fmt.int(step + 1)}` }));
+    } else {
+      // A flow bin sums its commits, so say which ones.
+      const [first, last] = this.binSteps(bin);
+      const n = last - first + 1;
+      box.append(
+        h("div", { class: "h", text: n <= 0 ? "No commits" : n === 1 ? `Commit #${fmt.int(first + 1)}` : `${fmt.int(n)} commits (#${fmt.int(first + 1)}–#${fmt.int(last + 1)})` }),
+        h("div", { class: "sub", text: n <= 0 || n === 1 ? fmt.date(n === 1 ? tl.time(first) : d.lo + bin * w) : `${fmt.date(tl.time(first))} → ${fmt.date(tl.time(last))}` }),
+      );
+    }
     let total = 0;
+    let totalDown = 0;
     for (const s of [...d.series].reverse()) {
       const v = s.up[bin];
-      if (d.mode === "size") {
-        total += v;
-        box.append(tipRow(this.color(s.key), fmt.int(v), s.key));
-      } else if (v || s.down[bin]) {
-        box.append(tipRow(this.color(s.key), `+${fmt.compact(v)} −${fmt.compact(s.down[bin])}`, s.key));
-      }
+      total += v;
+      totalDown += s.down[bin];
+      if (d.mode === "size") box.append(tipRow(this.color(s.key), fmt.int(v), s.key));
+      else if (v || s.down[bin]) box.append(tipRow(this.color(s.key), `+${fmt.compact(v)} −${fmt.compact(s.down[bin])}`, s.key));
     }
     if (d.mode === "size") box.append(tipRow(null, fmt.int(total), "total lines"));
+    else box.append(tipRow(null, `+${fmt.int(total)} −${fmt.int(totalDown)}`, "total"));
     tooltip.show(e.clientX, e.clientY, box);
+  }
+
+  /** Steps whose x falls in bin i, [first, last] (empty when first > last), as the server bins them. */
+  private binSteps(i: number): [number, number] {
+    const d = this.data!;
+    const tl = this.app.tl;
+    const ax = this.strip.axis;
+    const w = (d.hi - d.lo) / d.bins;
+    const x0 = d.lo + i * w;
+    const x1 = i === d.bins - 1 ? d.hi : d.lo + (i + 1) * w;
+    let first = tl.stepAt(x0, ax);
+    if (tl.x(first, ax) < x0) first++;
+    let last = tl.stepAt(x1, ax);
+    if (tl.x(last, ax) >= x1) last--;
+    return [first, last];
   }
 
   protected onPointerLeave() {
