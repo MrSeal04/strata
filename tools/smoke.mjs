@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Smoke test: extract a fixture into a temporary cache, serve it, open the home page and the
-// dashboard at desktop and phone widths, and fail on any page error, console error or HTTP error.
+// dashboard at desktop and phone widths, exercise every view mode, playback and zoom, check that
+// phones scroll the page until a card is zoomed, and fail on any page, console or HTTP error.
 // Usage: node tools/smoke.mjs [strata-binary] [out-dir]
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync } from "node:fs";
@@ -64,10 +65,71 @@ try {
         a.store.set({ compare: { a: 1, b: a.store.get().steps - 1, mode: "side" } });
         await new Promise((r) => setTimeout(r, 600));
         a.store.set({ compare: null });
+        // Every way the squares can look: what they show x how they're sized x their layout.
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        for (const colorBy of ["dir", "lang", "author", "cohort", "edited", "heat"]) {
+          for (const treemapMeasure of ["size", "churn"]) {
+            for (const treemapLayout of ["live", "steady"]) {
+              a.store.setSettings({ colorBy, treemapMeasure, treemapLayout });
+              await wait(150);
+            }
+          }
+        }
+        // Play the heaviest combination over a brushed range, then zoom everything.
+        a.store.set({ brush: [2, a.store.get().steps - 1] });
+        a.store.setSettings({ colorBy: "author", treemapMeasure: "churn", treemapLayout: "steady" });
+        a.player.seek(2);
+        a.player.play();
+        await wait(800);
+        a.player.pause();
+        const v = window.strata.views;
+        v.treemap.zoom.set(4, 60, 60);
+        await wait(300);
+        v.treemap.zoom.reset();
+        for (const treeLayout of ["radial", "sunburst", "icicle", "force"]) {
+          a.store.setSettings({ treeLayout });
+          await wait(150);
+          v.tree.zoom.set(3, 80, 80);
+          await wait(200);
+        }
+        a.store.set({ brush: null });
+        a.store.setSettings({ colorBy: "lang", treemapMeasure: "size", treemapLayout: "live" });
       });
       await new Promise((r) => setTimeout(r, 800));
     }
     await page.screenshot({ path: join(out, `${name}.png`) });
+    await page.close();
+  }
+  // Phones: a one-finger drag over the treemap scrolls the page until the treemap is zoomed in,
+  // then it pans the treemap instead.
+  {
+    const page = await browser.newPage();
+    page.on("pageerror", (e) => failures.push(`touch: page error: ${e.message}`));
+    await page.setViewport({ width: 420, height: 700, isMobile: true, hasTouch: true });
+    await page.goto(`http://127.0.0.1:${port}/#/r/${id}`, { waitUntil: "networkidle0" });
+    await new Promise((r) => setTimeout(r, 1500));
+    const box = await (await page.$(".card canvas:last-of-type")).boundingBox();
+    const drag = async () => {
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height * 0.7;
+      await page.touchscreen.touchStart(x, y);
+      for (let i = 1; i <= 10; i++) await page.touchscreen.touchMove(x - i * 2, y - i * 12);
+      await page.touchscreen.touchEnd();
+      await new Promise((r) => setTimeout(r, 400));
+    };
+    const state = () => page.evaluate(() => ({ y: window.scrollY, k: window.strata.views.treemap.zoom.k, ty: window.strata.views.treemap.zoom.y }));
+    await drag();
+    const s1 = await state();
+    if (!(s1.y > 0 && s1.k === 1)) failures.push(`touch: a drag at normal zoom should scroll the page (${JSON.stringify(s1)})`);
+    await page.evaluate(() => {
+      window.scrollTo(0, 0);
+      window.strata.views.treemap.zoom.set(4, 100, 100);
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const before = await state();
+    await drag();
+    const s2 = await state();
+    if (!(s2.y === 0 && s2.ty !== before.ty)) failures.push(`touch: a drag when zoomed should pan the treemap (${JSON.stringify({ before, after: s2 })})`);
     await page.close();
   }
   await browser.close();

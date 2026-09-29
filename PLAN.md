@@ -301,11 +301,16 @@ steps of events.
 | `GET /api/r/:repo/paths` | Arrow: the path dictionary (id, path, lang, category) |
 | `GET /api/r/:repo/bars?from&to&bins&axis&filters` | Arrow: binned adds and dels |
 | `GET /api/r/:repo/area?…&slice=dir\|lang\|author\|cohort&mode=size\|flow&depth&top` | Arrow: stacked series |
-| `GET /api/r/:repo/state?step&root&filters` | Arrow: file state at a step (lines, bytes, age, top author) |
+| `GET /api/r/:repo/state?step&root&filters` | Arrow: file state at a step (lines, bytes, age, top author, last content edit) |
 | `GET /api/r/:repo/events?from&to&root&filters` | Arrow: change events for forward playback |
 | `GET /api/r/:repo/step/:n` | JSON: commit details, files touched, side commits |
 | `GET /api/r/:repo/search?q&kind=path\|author\|message` | matching steps and paths |
 | `GET /api/r/:repo/compare?a&b&root&filters` | Arrow: per-path lines at A and B |
+| `GET /api/r/:repo/keys?…area params` | Arrow: the keys an area query labels, best first (§13) |
+| `GET /api/r/:repo/composition?slice&unit&keys&mode&from&to` | Arrow: per file and tracked key, surviving lines (size) or lines changed (flow) (§13) |
+| `GET /api/r/:repo/origins?…composition params` | Arrow: `composition` rows per step over (from, to], for playback |
+| `GET /api/r/:repo/churn?from&to&filters` | Arrow: lines added and deleted per file over (from, to], deleted files included |
+| `GET /api/r/:repo/span?from&to&filters` · `/renames?from&to` | Arrow: every file alive in [from, to] with its end size; renames in the range (steady layout) |
 | `POST /api/render/:job/frame` | headless render frame sink (§7.2) |
 
 Bulk data travels as Arrow IPC and small payloads as JSON.
@@ -557,3 +562,58 @@ Linux (77,194 first-parent steps; the scale target):
 
 Additions not in the original plan: the WebGL2 treemap layer (§10's escape hatch), per-repo
 lazy aggregates, the query cache, `strata bench --verify` and `tools/smoke.mjs` (make smoke).
+
+---
+
+## 13. The treemap as a data window (2026-09-29)
+
+"Files by size" can now show everything the stacked area can, plus recency, zoom and a steady
+playback layout:
+
+- **Show:** directory, language, author, when written, last edited, recent activity; a depth or
+  cohort unit when it applies. Colors are shared with the area chart (`model/slices.ts`).
+- **Author and when-written bands:** each file is split into strips by its surviving lines per
+  key. The keys are exactly the area chart's labels: `/keys` runs the same ranking SQL
+  (`rank_sql`, now ranked per step, so it no longer depends on the bin count), and author color
+  slots go to those authors by surviving lines instead of the top committers. The breakdown is
+  a `StateSync` layer (`model/composition.ts`) loaded with `/state` and advanced from `/origins`
+  chunks, so it never disagrees with the tree.
+- **Last edited:** a thermal ramp on a log time scale from the cursor. `edited` is the step that
+  last changed a file's content; a pure move keeps its source's (the store derives
+  `rename_edits`, ~20k rows on Linux, once per load). No re-extraction.
+- **Sized by lines changed:** every text file changed from the range start to the cursor, deleted
+  files included (`model/churn.ts`, loaded from `/churn`, then added up from the same `/events`
+  rows while playing). Bands switch to lines changed per key, with a rename's moved lines netted
+  out.
+- **Zoom and pan** in the treemap (semantic: laid out at the zoomed size, so folders open into
+  files) and every tree layout (geometric; labels appear as room opens). On phones a one-finger
+  drag scrolls the page until a card is zoomed in.
+- **Steady layout:** the binary tiling is recorded at the end of the range (every cut and each
+  folder's padding) and replayed with the current sizes, so files grow and shrink in place; a
+  rename lineage keeps moved content where it ends up. The last frame equals the live treemap
+  (0 px difference on git/git).
+
+| Plan | What was built | Why |
+|---|---|---|
+| `kf_edits` snapshots per keyframe | One aggregate over `changes` up to the step | 15–20 ms at Linux's HEAD (1.7M rows). A left-only term in the join's ON clause had made it 4.4 s; it's gone. |
+| Composition snapshots per keyframe if slow | Plain queries | 90–200 ms at Linux's HEAD (5.1M origin rows); 12 ms per playback chunk. |
+| Tree zoom raises the node budget | Geometric zoom, more labels | More leaves reshuffle the radial, sunburst and icicle angles, including the zoomed region. |
+| Frozen padding replayed as is | Capped at 45% of the folder's extent | Folders far smaller than at the end collapsed under their headers. |
+
+Found on the way: the WebGL treemap came up blank until something redrew it (the first frame
+after a layout painted the 2D canvas opaque over the fills), and a folder's sort order depended
+on which of its files was loaded first. Both are fixed.
+
+Measured on Linux at step 40,000 (37k files, `--gpu`, load ~1.3), playing:
+
+| Treemap | Frame (mean / p95) | fps |
+|---|---|---|
+| Language, live | 13–16 / 33–36 ms | 35–40 |
+| Author bands, live | 25–28 / 46–50 ms | 22–24 |
+| Author bands, steady | 29–32 / 100–109 ms | 21–22 |
+
+A steady relayout re-tiles every file the range ever had: 96 ms against 28 ms live, so the
+relayout throttle adapts to at most a quarter of the time. On git/git the steady layout moves
+files 5–10× less between nearby commits (mean center shift 11.5 → 1.9 px over 100 commits).
+Author mode costs ~28 ms a frame even with the strips turned off, so the gap to language mode
+is elsewhere in that path; not yet profiled.

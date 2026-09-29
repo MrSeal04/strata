@@ -4,10 +4,15 @@ See how a git repository grew. `strata` reads a repo's history, measures every c
 additions and deletions, tracks which commit (and author) wrote every surviving line, and plays
 the history back in a browser dashboard with four linked views:
 
-- **Evolving treemap**: every file sized by lines, laid out stably so files grow in place.
-  Color by language, recent activity, line age or top author, and click to zoom into a folder.
+- **Evolving treemap**: every file sized by lines, or by lines changed from the start of the
+  selected range. It shows what the stacked area shows: directory, language, and author or
+  *when written*, as bands inside each file in the area chart's colors. It also shows a
+  last-edited heatmap and recent activity. A steady layout keeps every file where it ends up,
+  so you can watch it grow or shrink. Wheel or pinch to zoom, drag to pan, click to open a
+  folder.
 - **File tree**: force-directed (Gource-style, the default), a radial tidy tree, sunburst or
-  icicle. Big folders collapse to fit, and author "actors" fly to the files they touch.
+  icicle, all zoomable. Big folders collapse to fit, and author "actors" fly to the files they
+  touch.
 - **Stacked area**: repository size by directory, language, author (surviving lines) or
   *when lines were written* (survival cohorts), or added/deleted lines per period.
 - **Per-commit bars**: additions up, deletions down, with a linear/sqrt/log scale and outlier

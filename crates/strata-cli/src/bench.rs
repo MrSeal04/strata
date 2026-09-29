@@ -6,7 +6,9 @@ use std::time::Instant;
 use clap::Args;
 use strata_engine::ExtractOptions;
 use strata_store::pipeline::extract_source;
-use strata_store::{AreaMode, AreaQuery, Axis, Bins, Db, Filters, Layout, Slice, Source};
+use strata_store::{
+    AreaMode, AreaQuery, Axis, Bins, CompositionQuery, Db, Filters, Layout, Slice, Source,
+};
 
 #[derive(Args)]
 pub struct BenchArgs {
@@ -160,6 +162,13 @@ pub fn run(layout: Layout, args: BenchArgs) -> anyhow::Result<()> {
         top: 12,
         unit: "year".into(),
     };
+    let comp = |slice, mode, from: i64, to: u32| CompositionQuery {
+        area: area(slice, mode),
+        keys: vec![],
+        mode,
+        from,
+        to,
+    };
     let queries: Vec<(&str, Q)> = vec![
         (
             "summary",
@@ -246,6 +255,51 @@ pub fn run(layout: Layout, args: BenchArgs) -> anyhow::Result<()> {
             Box::new(|| Ok(db.search(&id, "src", "path", 20_000)?.to_string().len())),
         ),
         ("dirs", Box::new(|| Ok(db.dirs(&id, "", &f)?.len()))),
+        // The treemap's data window: band keys, bands, churn and the steady layout's reference.
+        (
+            "keys/author",
+            Box::new(|| {
+                Ok(db
+                    .keys(&id, &f, &b, &area(Slice::Author, AreaMode::Size))?
+                    .len())
+            }),
+        ),
+        (
+            "composition",
+            Box::new(|| {
+                Ok(db
+                    .composition(&id, &f, &comp(Slice::Author, AreaMode::Size, -1, last))?
+                    .len())
+            }),
+        ),
+        (
+            "composition/flow",
+            Box::new(|| {
+                Ok(db
+                    .composition(&id, &f, &comp(Slice::Cohort, AreaMode::Flow, -1, last))?
+                    .len())
+            }),
+        ),
+        (
+            "origins/200",
+            Box::new(|| {
+                Ok(db
+                    .origins(
+                        &id,
+                        &f,
+                        &comp(
+                            Slice::Author,
+                            AreaMode::Size,
+                            i64::from(last / 2),
+                            last / 2 + 200,
+                        ),
+                    )?
+                    .len())
+            }),
+        ),
+        ("churn", Box::new(|| Ok(db.churn(&id, -1, last, &f)?.len()))),
+        ("span", Box::new(|| Ok(db.span(&id, 0, last, &f)?.len()))),
+        ("renames", Box::new(|| Ok(db.renames(&id, 0, last)?.len()))),
     ];
     println!(
         "{:<16}{:>10}{:>10}{:>10}{:>12}",

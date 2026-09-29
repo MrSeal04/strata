@@ -225,6 +225,10 @@ export class TreemapView extends View {
     return [{ key: "L", label: null, tree: this.app.tree, x: 0, w: W }];
   }
 
+  /** Composition revision the painted bands show, and when they were last refreshed. */
+  private bandsRev = -1;
+  private bandsAt = 0;
+
   /** How long the last relayout took (ms). */
   private relayoutMs = 0;
 
@@ -395,7 +399,13 @@ export class TreemapView extends View {
     const bandsOn = !comparing && (colorBy === "author" || colorBy === "cohort") && comp.ready(colorBy);
     // Activity rings on just-touched files, except where the colors already say it.
     const ringsOn = colorBy !== "heat" && colorBy !== "edited";
-    const colorKey = `${this.viewKey()}|${colorBy}|${bandsOn ? comp.rev : ""}|${colorBy === "author" ? colorMaps.author.version : ""}|${s.settings.theme}|${s.settings.diffColors}|${comparing}|${this.app.compare.data?.key ?? ""}|${s.search?.q ?? ""}|${sliceKey}`;
+    // While playing, bands change with every chunk of history; repaint them a few times a second
+    // and let frames in between reuse the last batches (they cost as much as a relayout).
+    if (bandsOn && comp.rev !== this.bandsRev && (!s.playing || now - this.bandsAt >= 250)) {
+      this.bandsRev = comp.rev;
+      this.bandsAt = now;
+    }
+    const colorKey = `${this.viewKey()}|${colorBy}|${bandsOn ? this.bandsRev : ""}|${colorBy === "author" ? colorMaps.author.version : ""}|${s.settings.theme}|${s.settings.diffColors}|${comparing}|${this.app.compare.data?.key ?? ""}|${s.search?.q ?? ""}|${sliceKey}`;
     const reuse = !this.geomMoving && k < 1 && this.frame?.key === colorKey;
     let geom = false;
     let dirs: number[];
