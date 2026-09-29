@@ -7,11 +7,12 @@ import { CanvasPainter } from "../paint/canvas";
 import type { Painter } from "../paint/painter";
 import type { TreeLayout } from "../state/store";
 import { palette } from "../theme";
-import { fmt, h } from "../ui/dom";
+import { fmt, h, icon } from "../ui/dom";
 import { tipRow, tooltip } from "../ui/tooltip";
 import { clock } from "../clock";
 import { renderColorLegend } from "./colorlegend";
 import { View } from "./view";
+import { ZoomPan } from "./zoom";
 
 /** A node of the visible (budget-limited) tree. Collapsed directories stand in for their subtree. */
 interface VNode {
@@ -103,13 +104,28 @@ export class TreeView extends View {
   private beams: Beam[] = [];
   private lastActorStep = -1;
   private layoutSel: HTMLSelectElement;
+  /** Wheel/pinch zoom and pan over the layout (world units = the unzoomed card). */
+  readonly zoom: ZoomPan;
+  private zoomBtn: HTMLButtonElement;
 
   constructor(private app: App) {
     super("tree", "File tree");
     this.layoutSel = h("select", { "aria-label": "Layout" }, ...(Object.keys(LAYOUT_LABEL) as TreeLayout[]).map((k) => h("option", { value: k, text: LAYOUT_LABEL[k] })));
     this.layoutSel.value = app.store.get().settings.treeLayout;
     this.layoutSel.addEventListener("change", () => app.store.setSettings({ treeLayout: this.layoutSel.value as TreeLayout }));
+    this.zoomBtn = h("button", { class: "btn icon", title: "Reset zoom", "aria-label": "Reset zoom" }, icon("fit"));
+    this.zoomBtn.addEventListener("click", () => this.zoom.reset());
+    this.zoomBtn.style.display = "none";
+    this.zoom = new ZoomPan(this.canvas);
+    this.zoom.onChange = () => {
+      tooltip.hide();
+      this.zoomBtn.style.display = this.zoom.zoomed ? "" : "none";
+      this.invalidate();
+    };
     this.addControl(this.layoutSel);
+    this.addControl(this.zoomBtn);
+    // A new root or layout starts unzoomed.
+    app.store.watch((s) => [s.root, s.settings.treeLayout], () => this.zoom.reset());
     app.store.watch((s) => [s.settings.treeLayout, s.settings.nodeBudget, s.root, s.filterRev], () => {
       this.layoutSel.value = app.store.get().settings.treeLayout;
       this.builtKey = "";
@@ -309,7 +325,8 @@ export class TreeView extends View {
         for (let i = 0; i < this.order.length; i++) maxR = Math.max(maxR, Math.hypot(xy[i * 2], xy[i * 2 + 1]));
         // Fit the simulation's extent into the card (smoothly).
         const fit = (Math.min(this.width, this.height) / 2 - 16) / maxR;
-        this.forceScale += (fit - this.forceScale) * 0.1;
+        // (frozen while zoomed, so the view doesn't drift away from where it was zoomed)
+        if (!this.zoom.zoomed) this.forceScale += (fit - this.forceScale) * 0.1;
         const cx = this.width / 2;
         const cy = this.height / 2;
         for (let i = 0; i < this.order.length; i++) {
@@ -403,9 +420,14 @@ export class TreeView extends View {
     const colorBy = s.settings.colorBy;
     const pos = s.pos;
 
+    // Geometry is in world units (the unzoomed card); everything is painted through the zoom.
+    const Z = this.zoom;
+    const zk = Z.k;
+    const W = this.width;
+    const H = this.height;
     if (kind === "sunburst" || kind === "icicle") {
-      const cx = this.width / 2;
-      const cy = this.height / 2;
+      const cx = Z.sx(this.width / 2);
+      const cy = Z.sy(this.height / 2);
       for (const v of this.order) {
         if (v === this.vroot) continue;
         const g = this.shown.get(v.id);
@@ -414,11 +436,16 @@ export class TreeView extends View {
         const alpha = searchPaths && v.t.file && !searchPaths.has(v.t.file.pathId) ? 0.2 : 1;
         if (kind === "sunburst") {
           const gap = Math.min(0.004, (g.a1 - g.a0) * 0.2);
-          p.arc(cx, cy, g.r0 + 0.5, g.r1 - 0.5, g.a0 + gap, g.a1 - gap, fill, alpha);
+          p.arc(cx, cy, g.r0 * zk + 0.5, g.r1 * zk - 0.5, g.a0 + gap, g.a1 - gap, fill, alpha);
         } else {
-          p.rect(g.r0, g.a0, Math.max(0.5, g.r1 - g.r0 - 1), Math.max(0.5, g.a1 - g.a0 - 1), fill, alpha);
-          if (g.a1 - g.a0 > 13 && g.r1 - g.r0 > 40) {
-            p.text(v.t.name, g.r0 + 4, (g.a0 + g.a1) / 2, { color: pal.ink2, size: 10, baseline: "middle", maxWidth: g.r1 - g.r0 - 8 });
+          const x = Z.sx(g.r0);
+          const y = Z.sy(g.a0);
+          const w = (g.r1 - g.r0) * zk;
+          const hh = (g.a1 - g.a0) * zk;
+          if (x > W || y > H || x + w < 0 || y + hh < 0) continue;
+          p.rect(x, y, Math.max(0.5, w - 1), Math.max(0.5, hh - 1), fill, alpha);
+          if (hh > 13 && w > 40) {
+            p.text(v.t.name, Math.max(0, x) + 4, y + hh / 2, { color: pal.ink2, size: 10, baseline: "middle", maxWidth: Math.min(w, x + w) - 8 });
           }
         }
         const ht = v.t.file ? heat(this.app, v.t.file.touched, pos) : 0;
@@ -440,36 +467,42 @@ export class TreeView extends View {
           // d3.linkRadial: cubic through the mid radius, sampled
           const rm = (a.r0 + b.r0) / 2;
           const P = [a.x, a.y, cx + rm * Math.sin(a.a0), cy - rm * Math.cos(a.a0), cx + rm * Math.sin(b.a0), cy - rm * Math.cos(b.a0), b.x, b.y];
-          let px = P[0];
-          let py = P[1];
+          let px = Z.sx(P[0]);
+          let py = Z.sy(P[1]);
           for (let k = 1; k <= 6; k++) {
             const t = k / 6;
             const u = 1 - t;
-            const x = u * u * u * P[0] + 3 * u * u * t * P[2] + 3 * u * t * t * P[4] + t * t * t * P[6];
-            const y = u * u * u * P[1] + 3 * u * u * t * P[3] + 3 * u * t * t * P[5] + t * t * t * P[7];
+            const x = Z.sx(u * u * u * P[0] + 3 * u * u * t * P[2] + 3 * u * t * t * P[4] + t * t * t * P[6]);
+            const y = Z.sy(u * u * u * P[1] + 3 * u * u * t * P[3] + 3 * u * t * t * P[5] + t * t * t * P[7]);
             seg.push(px, py, x, y);
             px = x;
             py = y;
           }
         } else {
-          seg.push(a.x, a.y, b.x, b.y);
+          seg.push(Z.sx(a.x), Z.sy(a.y), Z.sx(b.x), Z.sy(b.y));
         }
       }
       p.segments(buckets[0], pal.inkMuted, 0.75, 0.55);
       p.segments(buckets[1], pal.inkMuted, 0.75, 0.3);
       p.segments(buckets[2], pal.inkMuted, 0.75, 0.12);
+      // Nodes grow with the zoom, but slower than the spacing, so zooming in opens room.
+      const rk = Math.sqrt(zk);
+      const off = (x: number, y: number, r: number) => x + r < 0 || y + r < 0 || x - r > W || y - r > H;
       for (const v of this.order) {
         const g = this.shown.get(v.id);
         if (!g) continue;
-        const r = this.radius(v);
+        const r = this.radius(v) * rk;
+        const x = Z.sx(g.x);
+        const y = Z.sy(g.y);
+        if (off(x, y, r + 6)) continue;
         if (v.t.isDir) {
           if (v.collapsed) {
             const fill = v.rep ? fileColor(this.app, v.rep, colorBy, pos) : pal.inkMuted;
-            p.circle(g.x, g.y, r + 1.5, pal.ink2, 0.9);
-            p.circle(g.x, g.y, r, fill, 1, pal.surface, 1);
-            if (r >= 5) p.text(fmt.compact(v.t.files), g.x, g.y + r + 8, { color: pal.inkMuted, size: 9, align: "center", baseline: "middle" });
+            p.circle(x, y, r + 1.5, pal.ink2, 0.9);
+            p.circle(x, y, r, fill, 1, pal.surface, 1);
+            if (r >= 5) p.text(fmt.compact(v.t.files), x, y + r + 8, { color: pal.inkMuted, size: 9, align: "center", baseline: "middle" });
           } else {
-            p.circle(g.x, g.y, 2, pal.ink2, 0.8);
+            p.circle(x, y, 2, pal.ink2, 0.8);
           }
           continue;
         }
@@ -478,30 +511,38 @@ export class TreeView extends View {
         const alpha = searchPaths && !searchPaths.has(f.pathId) ? 0.15 : 1;
         const ht = heat(this.app, f.touched, pos);
         if (ht > 0.05 && colorBy !== "heat" && colorBy !== "edited") {
-          p.circle(g.x, g.y, r + 5 * ht, f.lastDels > f.lastAdds ? pal.del : pal.add, 0.35 * ht);
+          p.circle(x, y, r + 5 * ht, f.lastDels > f.lastAdds ? pal.del : pal.add, 0.35 * ht);
           moving ||= s.playing;
         }
-        p.circle(g.x, g.y, r, fill, alpha, pal.surface, 1);
+        p.circle(x, y, r, fill, alpha, pal.surface, 1);
       }
-      // Name the top-level folders (largest first), skipping labels that would collide.
+      // Name folders, largest first, skipping labels that would collide: the top level at first,
+      // and as zooming opens room, deeper folders and then files too.
       const placed: [number, number, number, number][] = [];
-      const dirs = this.vroot.children.filter((c) => c.t.isDir).sort((a, b) => b.t.value - a.t.value);
-      for (const c of dirs) {
+      const named = zk > 1.5 ? this.order.filter((v) => v !== this.vroot && (v.t.isDir || zk > 3) && !v.synthetic) : this.vroot.children.filter((c) => c.t.isDir);
+      named.sort((a, b) => Number(b.t.isDir) - Number(a.t.isDir) || b.t.value - a.t.value || (b.t.file?.lines ?? 0) - (a.t.file?.lines ?? 0));
+      let budget = 250;
+      for (const c of named) {
         const g = this.shown.get(c.id);
         if (!g) continue;
+        const x = Z.sx(g.x);
+        const y = Z.sy(g.y);
+        if (off(x, y, 0)) continue;
         const right = kind !== "radial" || Math.sin(g.a0) >= 0;
-        const w = Math.min(120, p.measure(c.t.name, 10, 600));
-        const x0 = right ? g.x + 6 : g.x - 6 - w;
-        const box: [number, number, number, number] = [x0 - 2, g.y - 16, x0 + w + 2, g.y - 2];
+        const bold = c.t.isDir;
+        const w = Math.min(120, p.measure(c.t.name, 10, bold ? 600 : 400));
+        const x0 = right ? x + 6 : x - 6 - w;
+        const box: [number, number, number, number] = [x0 - 2, y - 16, x0 + w + 2, y - 2];
         if (placed.some((b) => box[0] < b[2] && box[2] > b[0] && box[1] < b[3] && box[3] > b[1])) continue;
         placed.push(box);
-        p.text(c.t.name, g.x + (right ? 6 : -6), g.y - 6, { color: pal.ink2, size: 10, weight: 600, align: right ? "left" : "right", maxWidth: 120 });
+        p.text(c.t.name, x + (right ? 6 : -6), y - 6, { color: bold ? pal.ink2 : pal.inkMuted, size: 10, weight: bold ? 600 : 400, align: right ? "left" : "right", maxWidth: 120 });
+        if (--budget <= 0) break;
       }
       if (s.settings.actors) moving = this.drawActors(p, now) || moving;
     }
     if (this.hover) {
       const g = this.shown.get(this.hover.id);
-      if (g && (kind === "radial" || kind === "force")) p.circle(g.x, g.y, this.radius(this.hover) + 3, pal.ink, 0.25);
+      if (g && (kind === "radial" || kind === "force")) p.circle(Z.sx(g.x), Z.sy(g.y), this.radius(this.hover) * Math.sqrt(zk) + 3, pal.ink, 0.25);
     }
     // caption: what the tree currently shows
     const files = this.order.filter((v) => !v.t.isDir).length;
@@ -531,8 +572,9 @@ export class TreeView extends View {
         }
         if (this.beams.length > 400) this.beams.splice(0, this.beams.length - 400);
         let a = this.actors.get(aid);
-        const tx = pts.length ? pts.reduce((acc, g) => acc + g.x, 0) / pts.length : this.width / 2;
-        const ty = pts.length ? pts.reduce((acc, g) => acc + g.y, 0) / pts.length : this.height / 2;
+        // Actors live on screen: they fly to where the files are drawn.
+        const tx = pts.length ? pts.reduce((acc, g) => acc + this.zoom.sx(g.x), 0) / pts.length : this.width / 2;
+        const ty = pts.length ? pts.reduce((acc, g) => acc + this.zoom.sy(g.y), 0) / pts.length : this.height / 2;
         if (!a) {
           const name = this.app.authorName(aid);
           a = { id: aid, name, x: Math.max(16, Math.min(this.width - 150, tx + 30)), y: Math.max(16, Math.min(this.height - 16, ty - 30)), tx, ty, last: now, img: null };
@@ -561,7 +603,7 @@ export class TreeView extends View {
       const g = this.shown.get(b.node);
       if (!a || !g) continue;
       const k = 1 - (now - b.born) / 700;
-      p.line(a.x, a.y, g.x, g.y, b.del ? pal.del : pal.add, 1.5, 0.6 * k);
+      p.line(a.x, a.y, this.zoom.sx(g.x), this.zoom.sy(g.y), b.del ? pal.del : pal.add, 1.5, 0.6 * k);
       busy = true;
     }
     for (const a of this.actors.values()) {
@@ -610,8 +652,10 @@ export class TreeView extends View {
     a.img = img;
   }
 
-  private hit(x: number, y: number): VNode | null {
+  private hit(sx: number, sy: number): VNode | null {
     const kind = this.app.store.get().settings.treeLayout;
+    const x = this.zoom.wx(sx);
+    const y = this.zoom.wy(sy);
     if (kind === "sunburst") {
       const dx = x - this.width / 2;
       const dy = y - this.height / 2;
@@ -632,7 +676,7 @@ export class TreeView extends View {
       return null;
     }
     let best: VNode | null = null;
-    let bd = 12 * 12;
+    let bd = (12 / this.zoom.k) ** 2;
     for (const v of this.order) {
       const g = this.shown.get(v.id);
       if (!g) continue;
@@ -675,7 +719,11 @@ export class TreeView extends View {
     this.invalidate();
   }
 
-  protected onPointerDown(x: number, y: number) {
+  protected onResize() {
+    this.zoom.resize(this.width, this.height);
+  }
+
+  protected onClick(x: number, y: number) {
     const v = this.hit(x, y);
     if (!v) return;
     const dir = v.synthetic ? v.t.parent : v.t.isDir ? v.t : v.t.parent;

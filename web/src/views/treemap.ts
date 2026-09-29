@@ -8,10 +8,11 @@ import { GlRects } from "../paint/glrects";
 import type { Painter } from "../paint/painter";
 import type { ColorBy } from "../state/store";
 import { palette } from "../theme";
-import { fmt, h } from "../ui/dom";
+import { fmt, h, icon } from "../ui/dom";
 import { tipRow, tooltip } from "../ui/tooltip";
 import { renderColorLegend } from "./colorlegend";
 import { View } from "./view";
+import { ZoomPan } from "./zoom";
 
 interface Rect {
   x0: number;
@@ -58,6 +59,14 @@ export class TreemapView extends View {
   /** WebGL layer for the rect fills of large treemaps (null without WebGL2). */
   private gl: GlRects | null = null;
   private glActive = false;
+  /** Wheel/pinch zoom and pan. Layouts are in world units (the unzoomed card) but computed at
+   *  the zoomed size, so padding, folder headers and level of detail follow on-screen pixels. */
+  readonly zoom: ZoomPan;
+  private zoomBtn: HTMLButtonElement;
+  /** Zoom the current layout was computed at. */
+  private layoutK = 1;
+  /** Layout + view the visible node lists were culled for. */
+  private cullKey = "";
 
   constructor(private app: App) {
     super("treemap", "Files by size");
@@ -89,9 +98,24 @@ export class TreemapView extends View {
       if (app.store.get().settings.colorBy === "cohort") app.store.setSettings({ cohortUnit: v as "auto" | "year" | "quarter" | "month" });
       else app.store.setSettings({ areaDepth: Number(v) });
     });
+    this.zoomBtn = h("button", { class: "btn icon", title: "Reset zoom", "aria-label": "Reset zoom" }, icon("fit"));
+    this.zoomBtn.addEventListener("click", () => this.zoom.reset());
+    this.zoomBtn.style.display = "none";
+    this.zoom = new ZoomPan(this.canvas);
+    this.zoom.onChange = () => {
+      tooltip.hide();
+      this.zoomBtn.style.display = this.zoom.zoomed ? "" : "none";
+      this.invalidate();
+    };
     this.addControl(this.showSel);
     this.addControl(this.extraSel);
     this.addControl(this.modeSel);
+    this.addControl(this.zoomBtn);
+    // A new root fills the card; compare lays out its own panes (no zoom there).
+    app.store.watch((s) => [s.root, !!s.compare], () => {
+      this.zoom.enabled = !app.store.get().compare;
+      this.zoom.reset();
+    }, true);
     app.store.watch((s) => [s.cursor, s.settings.colorBy, s.search?.paths.size, s.settings.theme, s.settings.diffColors, s.settings.areaDepth, s.settings.cohortUnit], () => this.invalidate());
     const legend = () => renderColorLegend(app, this.legend);
     // (the last-edited scale stretches with the history's age at the cursor)
@@ -165,7 +189,8 @@ export class TreemapView extends View {
       }
     }
     const top = (spec: Omit<Pane, "root" | "nodes">) => (spec.label ? 16 : 0);
-    this.lod = new WeakMap();
+    // Lay out at the zoomed size, then scale back to world units.
+    const kL = this.zoom.k;
     this.panes = this.paneSpecs().map((spec) => {
       const display = spec.tree.find(s.root) ?? spec.tree.root;
       const root = hierarchy<TNode>(display, (n) => (n.children ? stableChildren(n) : null)).sum((n) => (n.file && !n.file.binary ? n.file.lines : 0));
@@ -174,24 +199,46 @@ export class TreemapView extends View {
       const area = (n: HierarchyRectangularNode<TNode>) => (n.x1 - n.x0) * (n.y1 - n.y0);
       treemap<TNode>()
         .tile(treemapBinary)
-        .size([spec.w, this.height - top(spec)])
+        .size([spec.w * kL, (this.height - top(spec)) * kL])
         .paddingOuter((n) => (n.depth === 0 ? 2 : area(n) > 2500 ? 2 : area(n) > 400 ? 1 : 0))
         .paddingInner((n) => (area(n) > 1200 ? 1 : 0))
         .paddingTop((n) => (n.depth > 0 && n.data.isDir && n.x1 - n.x0 > 60 && n.y1 - n.y0 > 36 ? 15 : n.depth === 0 ? 2 : area(n) > 400 ? 1 : 0))(root);
       const r = root as LNode;
       r.each((n) => {
-        n.x0 += spec.x;
-        n.x1 += spec.x;
-        n.y0 += top(spec);
-        n.y1 += top(spec);
+        n.x0 = n.x0 / kL + spec.x;
+        n.x1 = n.x1 / kL + spec.x;
+        n.y0 = n.y0 / kL + top(spec);
+        n.y1 = n.y1 / kL + top(spec);
       });
-      // Level of detail: a folder smaller than ~30 px² is drawn as one rect in the color of its
-      // largest file instead of hundreds of sub-pixel slivers (at Linux scale most files are).
+      return { ...spec, root: r, nodes: [] };
+    });
+    // Directory colors go to the largest keys shown (the area chart ranks the same way).
+    if (s.settings.colorBy === "dir" && !s.compare && this.panes[0]?.root) assignDirColors(this.app, this.panes[0].root.data);
+    this.layoutK = kL;
+    this.layoutKey = this.currentKey();
+    this.layoutAt = clock.now();
+    this.cullKey = "";
+  }
+
+  /**
+   * The nodes to paint: on screen, and not below the level of detail. A folder smaller than
+   * ~30 px² on screen is drawn as one rect in the color of its largest file instead of hundreds
+   * of sub-pixel slivers (at Linux scale most files are). Cheap: runs on every pan.
+   */
+  private cull() {
+    const z = this.zoom;
+    const k2 = z.k * z.k;
+    const W = this.width;
+    const H = this.height;
+    this.lod = new WeakMap();
+    for (const pane of this.panes) {
       const nodes: LNode[] = [];
       const visit = (n: LNode) => {
-        if (area(n) < 0.02 || !(n.value ?? 0)) return;
+        const a = (n.x1 - n.x0) * (n.y1 - n.y0) * k2;
+        if (a < 0.02 || !(n.value ?? 0)) return;
+        if (z.sx(n.x1) < 0 || z.sx(n.x0) > W || z.sy(n.y1) < 0 || z.sy(n.y0) > H) return;
         nodes.push(n);
-        if (n.children && n.depth > 0 && area(n) < 30) {
+        if (n.children && n.depth > 0 && a < 30) {
           let best: LNode | null = null;
           for (const l of n.leaves()) if (l.data.file && (!best || (l.value ?? 0) > (best.value ?? 0))) best = l;
           if (best) this.lod.set(n.data, best.data);
@@ -199,13 +246,14 @@ export class TreemapView extends View {
         }
         n.children?.forEach((c) => visit(c as LNode));
       };
-      visit(r);
-      return { ...spec, root: r, nodes };
-    });
-    // Directory colors go to the largest keys shown (the area chart ranks the same way).
-    if (s.settings.colorBy === "dir" && !s.compare && this.panes[0]?.root) assignDirColors(this.app, this.panes[0].root.data);
-    this.layoutKey = this.currentKey();
-    this.layoutAt = clock.now();
+      if (pane.root) visit(pane.root);
+      pane.nodes = nodes;
+    }
+    this.cullKey = this.viewKey();
+  }
+
+  private viewKey(): string {
+    return `${this.layoutKey}|${this.zoom.k}|${this.zoom.x}|${this.zoom.y}`;
   }
 
   private currentKey(): string {
@@ -224,8 +272,12 @@ export class TreemapView extends View {
   }
 
   protected transparentBackground(): boolean {
-    return this.wantsGl();
+    this.clearedForGl = this.wantsGl();
+    return this.clearedForGl;
   }
+
+  /** Whether this frame's 2D canvas was cleared to show the GL layer (decided before `draw`). */
+  private clearedForGl = false;
 
   draw(p: Painter) {
     const pal = palette();
@@ -237,10 +289,17 @@ export class TreemapView extends View {
     const throttle = s.playing ? (nodeCount > 50_000 ? 800 : nodeCount > 20_000 ? 250 : 60) : 0;
     const key = this.currentKey();
     const sizeChanged = !this.layoutKey.startsWith(`${this.width}x${this.height}|`);
-    if (key !== this.layoutKey) {
-      if (sizeChanged || now - this.layoutAt >= throttle) this.relayout();
+    // Zooming paints the current layout scaled; once the wheel or pinch rests, lay out again at
+    // the new zoom so folders open up into their files.
+    const zoomSettled = this.zoom.k === this.layoutK || now - this.zoom.changedAt >= 120;
+    if (key !== this.layoutKey || (this.zoom.k !== this.layoutK && zoomSettled)) {
+      if (sizeChanged || now - this.layoutAt >= throttle || this.zoom.k !== this.layoutK) this.relayout();
       else this.invalidate();
     }
+    if (!zoomSettled) this.invalidate();
+    if (this.cullKey !== this.viewKey()) this.cull();
+    const z = this.zoom;
+    const zk = z.k;
     if (!this.panes.some((q) => q.nodes.length)) {
       const msg = s.compare && !this.app.compare.data ? "Loading comparison…" : this.app.tree.step < 0 ? "Loading…" : "No files at this point";
       p.text(msg, this.width / 2, this.height / 2, { color: pal.inkMuted, size: 12, align: "center" });
@@ -259,7 +318,7 @@ export class TreemapView extends View {
     const sliceKey = colorBy === "dir" ? `${s.settings.areaDepth}:${colorMaps.dir.version}` : colorBy === "cohort" ? cohortUnit(this.app) : colorBy === "heat" ? pos : colorBy === "edited" ? s.cursor : "";
     // Activity rings on just-touched files, except where the colors already say it.
     const ringsOn = colorBy !== "heat" && colorBy !== "edited";
-    const colorKey = `${this.layoutKey}|${colorBy}|${s.settings.theme}|${s.settings.diffColors}|${comparing}|${this.app.compare.data?.key ?? ""}|${s.search?.q ?? ""}|${sliceKey}`;
+    const colorKey = `${this.viewKey()}|${colorBy}|${s.settings.theme}|${s.settings.diffColors}|${comparing}|${this.app.compare.data?.key ?? ""}|${s.search?.q ?? ""}|${sliceKey}`;
     const reuse = !this.geomMoving && k < 1 && this.frame?.key === colorKey;
     let geom = false;
     let dirs: number[];
@@ -279,9 +338,9 @@ export class TreemapView extends View {
           const r = node?.shown;
           if (!f || !r || f.touched < 0 || pos - f.touched > 400) continue;
           const ht = heat(this.app, f.touched, pos);
-          const w = r.x1 - r.x0;
-          const hh = r.y1 - r.y0;
-          if (ht > 0.15 && w > 2 && hh > 2) rings.push([r.x0 + 0.75, r.y0 + 0.75, w - 1.5, hh - 1.5, f.lastDels > f.lastAdds ? pal.del : pal.add, ht]);
+          const w = (r.x1 - r.x0) * zk;
+          const hh = (r.y1 - r.y0) * zk;
+          if (ht > 0.15 && w > 2 && hh > 2) rings.push([z.sx(r.x0) + 0.75, z.sy(r.y0) + 0.75, w - 1.5, hh - 1.5, f.lastDels > f.lastAdds ? pal.del : pal.add, ht]);
           if (ht > 0.05) moving ||= s.playing;
         }
       }
@@ -312,14 +371,17 @@ export class TreemapView extends View {
           r.x1 = n.x1;
           r.y1 = n.y1;
         }
-        const w = r.x1 - r.x0;
-        const hh = r.y1 - r.y0;
+        // world -> screen
+        const X = z.sx(r.x0);
+        const Y = z.sy(r.y0);
+        const w = (r.x1 - r.x0) * zk;
+        const hh = (r.y1 - r.y0) * zk;
         const rep = n.data.isDir ? this.lod.get(n.data) : undefined;
         if (n.data.isDir && !rep) {
           if (n.depth === 0) continue;
-          dirs.push(r.x0, r.y0, w, hh);
+          dirs.push(X, Y, w, hh);
           const child = n.children?.[0];
-          if (child && child.y0 - n.y0 >= 14.5 && w > 60) labels.push([n.data.name, r.x0 + 4, r.y0 + 7.5, w - 8, pal.ink2, true]);
+          if (child && (child.y0 - n.y0) * zk >= 14.5 && w > 60) labels.push([n.data.name, Math.max(X, 0) + 4, Y + 7.5, Math.min(w, X + w) - 8, pal.ink2, true]);
           continue;
         }
         const leaf = rep ?? n.data;
@@ -332,19 +394,28 @@ export class TreemapView extends View {
           g = { fill, alpha, xywh: [] };
           groups.set(gk, g);
         }
-        g.xywh.push(r.x0, r.y0, w, hh);
+        g.xywh.push(X, Y, w, hh);
         // Activity cue in every mode: a brief ring on files touched right now.
         if (!comparing && !rep && f.touched >= 0 && pos - f.touched < 400) {
           const ht = heat(this.app, f.touched, pos);
-          if (ringsOn && ht > 0.15 && w > 2 && hh > 2) rings.push([r.x0 + 0.75, r.y0 + 0.75, w - 1.5, hh - 1.5, f.lastDels > f.lastAdds ? pal.del : pal.add, ht]);
+          if (ringsOn && ht > 0.15 && w > 2 && hh > 2) rings.push([X + 0.75, Y + 0.75, w - 1.5, hh - 1.5, f.lastDels > f.lastAdds ? pal.del : pal.add, ht]);
           if (ht > 0.05) moving ||= s.playing;
         }
-        if (!rep && w > 46 && hh > 16) labels.push([n.data.name, r.x0 + 4, r.y0 + 11, w - 8, inkOn(fill), false]);
+        if (!rep && w > 46 && hh > 16) labels.push([n.data.name, Math.max(X, 0) + 4, Math.max(Y, 0) + 11, Math.min(w, X + w) - 8, inkOn(fill), false]);
       }
     }
     this.frame = { key: colorKey, dirs, groups, labels };
     }
     const useGl = this.onScreen && this.wantsGl();
+    // Show the layer before drawing into it: a frame drawn while it is display:none is never
+    // presented, and a still page would keep an empty treemap until something redraws it.
+    if (this.gl && useGl !== this.glActive) {
+      this.glActive = useGl;
+      this.gl.canvas.style.display = useGl ? "" : "none";
+    }
+    // The first frame after a relayout painted the 2D canvas opaque (its node count wasn't known
+    // yet), hiding the GL fills underneath: paint once more.
+    if (useGl && !this.clearedForGl) this.invalidate();
     if (useGl && this.gl) {
       this.gl.begin();
       this.gl.add(dirs, pal.dir);
@@ -354,23 +425,21 @@ export class TreemapView extends View {
       p.rects(dirs, pal.dir);
       for (const g of groups.values()) p.rects(g.xywh, g.fill, g.alpha);
     }
-    if (this.gl && useGl !== this.glActive) {
-      this.glActive = useGl;
-      this.gl.canvas.style.display = useGl ? "" : "none";
-    }
     for (const [x, y, w, hh, c, a] of rings) p.strokeRect(x, y, w, hh, c, 1.5, a);
     for (const [text, x, y, maxWidth, color, bold] of labels) {
       p.text(text, x, y, bold ? { color, size: 10, weight: 600, baseline: "middle", maxWidth } : { color, size: 10, maxWidth });
     }
     if (this.hover) {
       const r = this.hover.node.data.shown;
-      if (r) p.strokeRect(r.x0 + 0.5, r.y0 + 0.5, r.x1 - r.x0 - 1, r.y1 - r.y0 - 1, pal.ink, 1.5);
+      if (r) p.strokeRect(z.sx(r.x0) + 0.5, z.sy(r.y0) + 0.5, (r.x1 - r.x0) * zk - 1, (r.y1 - r.y0) * zk - 1, pal.ink, 1.5);
     }
     this.geomMoving = geom;
     this.moving = moving || geom;
   }
 
-  private hit(x: number, y: number): { pane: Pane; node: LNode } | null {
+  private hit(sx: number, sy: number): { pane: Pane; node: LNode } | null {
+    const x = this.zoom.wx(sx);
+    const y = this.zoom.wy(sy);
     const pane = this.panes.find((q) => x >= q.x && x <= q.x + q.w);
     let n = pane?.root;
     if (!pane || !n) return null;
@@ -435,7 +504,11 @@ export class TreemapView extends View {
     this.invalidate();
   }
 
-  protected onPointerDown(x: number, y: number) {
+  protected onResize() {
+    this.zoom.resize(this.width, this.height);
+  }
+
+  protected onClick(x: number, y: number) {
     const hit = this.hit(x, y);
     if (!hit) return;
     const n = hit.node;

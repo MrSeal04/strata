@@ -41,6 +41,7 @@ const ICONS: Record<string, string> = {
   table: "M2 3h12v10H2zM2 6.5h12M2 10h12M6 3v10",
   compare: "M3 3h4v10H3zM9 6h4v7H9z",
   back: "M10 3L5 8l5 5",
+  fit: "M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4",
 };
 
 export function icon(name: string, filled = false): SVGSVGElement {

@@ -41,6 +41,11 @@ export abstract class View {
       const r = this.canvas.getBoundingClientRect();
       this.onPointerDown(e.clientX - r.left, e.clientY - r.top, e);
     });
+    // Fires only when the pointer didn't drag (d3-zoom swallows the click after a pan).
+    this.canvas.addEventListener("click", (e) => {
+      const r = this.canvas.getBoundingClientRect();
+      this.onClick(e.clientX - r.left, e.clientY - r.top, e);
+    });
     this.canvas.addEventListener("dblclick", (e) => {
       const r = this.canvas.getBoundingClientRect();
       this.onDoubleClick(e.clientX - r.left, e.clientY - r.top);
@@ -148,6 +153,7 @@ export abstract class View {
   protected onPointerMove(_x: number, _y: number, _e: PointerEvent) {}
   protected onPointerLeave() {}
   protected onPointerDown(_x: number, _y: number, _e: PointerEvent) {}
+  protected onClick(_x: number, _y: number, _e: MouseEvent) {}
   protected onDoubleClick(_x: number, _y: number) {}
 
   destroy() {
