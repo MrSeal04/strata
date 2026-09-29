@@ -979,6 +979,39 @@ impl Db {
         })
     }
 
+    /// Every file alive at some step in `[from, to]` (the steady treemap's reference): its lines
+    /// at `to` (0 once deleted), whether it's binary, and the last step it was alive in its own
+    /// right (added or changed; `from` if untouched since), which tells a path that was only
+    /// ever renamed away from one that came back.
+    pub fn span(&self, repo: &str, from: u32, to: u32, f: &Filters) -> anyhow::Result<Vec<u8>> {
+        self.with(repo, |c, s| {
+            self.ipc_cached(c, &format!(
+                "WITH st AS ({start}),
+                 ch AS (SELECT path_id, max(step) FILTER (WHERE kind IN (0, 1, 3)) AS live
+                        FROM {s}.changes WHERE step > {from} AND step <= {to} GROUP BY path_id),
+                 en AS ({end}),
+                 a AS (SELECT path_id FROM st UNION SELECT path_id FROM ch WHERE live IS NOT NULL)
+                 SELECT a.path_id, coalesce(en.lines, 0)::INTEGER AS lines_end, coalesce(en.binary, false) AS binary,
+                        coalesce(ch.live, {from})::INTEGER AS last_live, en.path_id IS NOT NULL AS alive_end
+                 FROM a JOIN {s}.paths p USING (path_id) LEFT JOIN ch USING (path_id) LEFT JOIN en USING (path_id)
+                 WHERE {pp} ORDER BY a.path_id",
+                start = state_sql(s, from, f),
+                end = state_sql(s, to, f),
+                pp = f.path_pred(),
+            ))
+        })
+    }
+
+    /// Renames over `(from, to]`: (step, path_id, old_path_id), oldest first.
+    pub fn renames(&self, repo: &str, from: u32, to: u32) -> anyhow::Result<Vec<u8>> {
+        self.with(repo, |c, s| {
+            self.ipc_cached(c, &format!(
+                "SELECT step::INTEGER AS step, path_id, old_path_id FROM {s}.changes
+                 WHERE kind = 3 AND old_path_id IS NOT NULL AND step > {from} AND step <= {to} ORDER BY step, path_id"
+            ))
+        })
+    }
+
     /// Per-path lines at two steps.
     pub fn compare(&self, repo: &str, a: u32, b: u32, f: &Filters) -> anyhow::Result<Vec<u8>> {
         self.with(repo, |c, s| {

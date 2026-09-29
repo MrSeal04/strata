@@ -117,6 +117,9 @@ export class FileTree {
       if (!next) {
         next = new TNode(acc, parts[i], node, true, order);
         node.children!.set(parts[i], next);
+      } else if (order < next.order) {
+        // A folder's place is its oldest file's, whichever file happened to create it.
+        next.order = order;
       }
       node = next;
     }

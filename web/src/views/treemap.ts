@@ -1,9 +1,10 @@
-import { type HierarchyRectangularNode, hierarchy, treemap, treemapBinary } from "d3";
+import { type HierarchyRectangularNode, treemapBinary } from "d3";
 import type { App } from "../app";
 import { clock } from "../clock";
 import { colorMaps, inkOn } from "../model/colors";
-import { type FileTree, type TNode, stableChildren } from "../model/filetree";
+import type { FileTree, TNode } from "../model/filetree";
 import { COLOR_BY_LABEL, assignDirColors, cohortUnit, fileColor, growthColor, heat, heatColor, heatSpan } from "../model/slices";
+import { SteadyLayout, layoutTree, livePadding } from "../model/steady";
 import { GlRects } from "../paint/glrects";
 import type { Painter } from "../paint/painter";
 import type { ColorBy } from "../state/store";
@@ -57,6 +58,9 @@ export class TreemapView extends View {
   private showSel: HTMLSelectElement;
   private extraSel: HTMLSelectElement;
   private measureSel: HTMLSelectElement;
+  private layoutSel: HTMLSelectElement;
+  /** Steady layout: files keep their end-of-range places while playing. */
+  private steady: SteadyLayout;
   /** WebGL layer for the rect fills of large treemaps (null without WebGL2). */
   private gl: GlRects | null = null;
   private glActive = false;
@@ -111,9 +115,24 @@ export class TreemapView extends View {
     // Size: lines now. Churn: lines added + deleted from the range start to the cursor.
     this.measureSel = h("select", { "aria-label": "Square size" }, h("option", { value: "size", text: "sized by lines" }), h("option", { value: "churn", text: "sized by lines changed" }));
     this.measureSel.addEventListener("change", () => app.store.setSettings({ treemapMeasure: this.measureSel.value as "size" | "churn" }));
+    this.layoutSel = h("select", { "aria-label": "Layout" }, h("option", { value: "live", text: "live layout" }), h("option", { value: "steady", text: "steady layout" }));
+    this.layoutSel.title = "Steady: every file keeps the place it has at the end of the range, and playback only grows or shrinks it";
+    this.layoutSel.addEventListener("change", () => app.store.setSettings({ treemapLayout: this.layoutSel.value as "live" | "steady" }));
+    this.steady = new SteadyLayout(app);
+    this.steady.onReady = () => {
+      this.layoutKey = "";
+      this.updateTitle();
+      this.invalidate();
+    };
     this.addControl(this.showSel);
     this.addControl(this.extraSel);
     this.addControl(this.measureSel);
+    this.addControl(this.layoutSel);
+    app.store.watch((s) => [s.settings.treemapLayout, !!s.compare, s.brush, s.settings.treemapMeasure, s.filterRev, s.steps], () => {
+      this.steady.ensure();
+      this.layoutKey = "";
+      this.invalidate();
+    }, true);
     this.addControl(this.modeSel);
     this.addControl(this.zoomBtn);
     // A new root fills the card; compare lays out its own panes (no zoom there).
@@ -138,11 +157,13 @@ export class TreemapView extends View {
       legend();
       this.invalidate();
     });
-    app.store.watch((s) => [s.root, s.compare, s.filterRev, s.settings.colorBy, s.settings.areaDepth, s.settings.cohortUnit, s.settings.treemapMeasure, s.brush?.[0]], () => {
+    app.store.watch((s) => [s.root, s.compare, s.filterRev, s.settings.colorBy, s.settings.areaDepth, s.settings.cohortUnit, s.settings.treemapMeasure, s.brush, s.settings.treemapLayout], () => {
       this.layoutKey = "";
       this.updateTitle();
       this.invalidate();
     }, true);
+    // (the title says when the cursor is outside the steady layout's range)
+    app.store.watch((s) => (s.settings.treemapLayout === "steady" ? this.steady.usable() : true), () => this.updateTitle());
     app.compare.onChange(() => {
       this.layoutKey = "";
       this.invalidate();
@@ -162,6 +183,13 @@ export class TreemapView extends View {
         : `Files by size${s.root ? ` · ${s.root}/` : ""}`;
     this.measureSel.style.display = s.compare ? "none" : "";
     this.measureSel.value = st.treemapMeasure;
+    this.layoutSel.style.display = s.compare ? "none" : "";
+    this.layoutSel.value = st.treemapLayout;
+    if (!s.compare && st.treemapLayout === "steady" && !this.steady.usable()) {
+      const [a, b] = s.brush ?? [0, s.steps - 1];
+      const c = s.cursor;
+      t.textContent += c < a || c > b ? ` · steady layout covers #${fmt.int(a + 1)}–#${fmt.int(b + 1)}` : " · preparing steady layout…";
+    }
     this.modeSel.style.display = s.compare ? "" : "none";
     if (s.compare) this.modeSel.value = s.compare.mode;
     // Compare colors by growth, so the slice controls step aside.
@@ -197,7 +225,16 @@ export class TreemapView extends View {
     return [{ key: "L", label: null, tree: this.app.tree, x: 0, w: W }];
   }
 
+  /** How long the last relayout took (ms). */
+  private relayoutMs = 0;
+
   private relayout() {
+    const t0 = performance.now();
+    this.relayoutInner();
+    this.relayoutMs = performance.now() - t0;
+  }
+
+  private relayoutInner() {
     const s = this.app.store.get();
     const renamedFrom = new Set(this.app.tree.renames.values());
     this.renameRects.clear();
@@ -212,19 +249,14 @@ export class TreemapView extends View {
     const top = (spec: Omit<Pane, "root" | "nodes">) => (spec.label ? 16 : 0);
     // Lay out at the zoomed size, then scale back to world units.
     const kL = this.zoom.k;
+    const steady = this.steady.usable();
     this.panes = this.paneSpecs().map((spec) => {
-      const display = spec.tree.find(s.root) ?? spec.tree.root;
-      const root = hierarchy<TNode>(display, (n) => (n.children ? stableChildren(n) : null)).sum((n) => (n.file && !n.file.binary ? n.file.lines : 0));
-      // Padding only where it's visible: at Linux scale fixed gaps would eat every small file and
-      // leave gray folder backgrounds. Small folders pack their files edge to edge.
-      const area = (n: HierarchyRectangularNode<TNode>) => (n.x1 - n.x0) * (n.y1 - n.y0);
-      treemap<TNode>()
-        .tile(treemapBinary)
-        .size([spec.w * kL, (this.height - top(spec)) * kL])
-        .paddingOuter((n) => (n.depth === 0 ? 2 : area(n) > 2500 ? 2 : area(n) > 400 ? 1 : 0))
-        .paddingInner((n) => (area(n) > 1200 ? 1 : 0))
-        .paddingTop((n) => (n.depth > 0 && n.data.isDir && n.x1 - n.x0 > 60 && n.y1 - n.y0 > 36 ? 15 : n.depth === 0 ? 2 : area(n) > 400 ? 1 : 0))(root);
-      const r = root as LNode;
+      const w = spec.w * kL;
+      const hgt = (this.height - top(spec)) * kL;
+      const lines = (n: TNode) => (n.file && !n.file.binary ? n.file.lines : 0);
+      const r =
+        (steady && spec.label === null && spec.key !== "B" ? this.steady.layout(spec.tree, s.cursor, s.root, w, hgt) : null) ??
+        layoutTree(spec.tree.find(s.root) ?? spec.tree.root, w, hgt, lines, treemapBinary as never, livePadding);
       r.each((n) => {
         n.x0 = n.x0 / kL + spec.x;
         n.x1 = n.x1 / kL + spec.x;
@@ -298,7 +330,7 @@ export class TreemapView extends View {
   private currentKey(): string {
     const s = this.app.store.get();
     const specs = this.paneSpecs();
-    return `${this.width}x${this.height}|${s.root}|${specs.map((p) => `${p.key}:${p.tree.rev}`).join(",")}|${this.app.compare.data?.key ?? ""}`;
+    return `${this.width}x${this.height}|${s.root}|${specs.map((p) => `${p.key}:${p.tree.rev}`).join(",")}|${this.app.compare.data?.key ?? ""}|${this.steady.stateKey()}`;
   }
 
   protected animating() {
@@ -325,7 +357,9 @@ export class TreemapView extends View {
     const nodeCount = this.panes.reduce((a, q) => a + q.nodes.length, 0);
     // Relayout is O(files); at Linux scale do it a little over once a second while playing and
     // let the easing carry the motion in between.
-    const throttle = s.playing ? (nodeCount > 50_000 ? 800 : nodeCount > 20_000 ? 250 : 60) : 0;
+    // (and never more than a quarter of the time: the steady layout re-tiles every file there
+    // ever was, 3-4x the live cost at Linux scale)
+    const throttle = s.playing ? Math.max(nodeCount > 50_000 ? 800 : nodeCount > 20_000 ? 250 : 60, 4 * this.relayoutMs) : 0;
     const key = this.currentKey();
     const sizeChanged = !this.layoutKey.startsWith(`${this.width}x${this.height}|`);
     // Zooming paints the current layout scaled; once the wheel or pinch rests, lay out again at
@@ -539,7 +573,10 @@ export class TreemapView extends View {
 
   private describe(n: LNode): HTMLElement {
     const pal = palette();
-    const box = h("div", {}, h("div", { class: "h", text: n.data.id || "/" }));
+    // (steady layout: a place is where the content ends up; name the file there now)
+    const now = n.data.file ? this.app.paths.path[n.data.file.pathId] : undefined;
+    const box = h("div", {}, h("div", { class: "h", text: now ?? (n.data.id || "/") }));
+    if (now && now !== n.data.id) box.append(h("div", { class: "sub", text: `moves to ${n.data.id} later` }));
     if (n.data.isDir) {
       box.append(tipRow(null, fmt.int(n.value ?? 0), "lines"), tipRow(null, fmt.int(n.data.files), "files"));
       box.append(h("div", { class: "sub", text: "Click to zoom in" }));

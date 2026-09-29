@@ -30,6 +30,8 @@ export interface Settings {
   colorBy: ColorBy;
   /** Treemap square size: current lines, or lines added + deleted from the range start to the cursor. */
   treemapMeasure: "size" | "churn";
+  /** Treemap layout: re-tiled every frame, or steady (files keep their end-of-range places). */
+  treemapLayout: "live" | "steady";
   actors: boolean;
   gravatar: boolean;
   nodeBudget: number;
@@ -58,6 +60,7 @@ export const DEFAULT_SETTINGS: Settings = {
   treeLayout: "force",
   colorBy: "lang",
   treemapMeasure: "size",
+  treemapLayout: "live",
   actors: false,
   gravatar: false,
   nodeBudget: 6000,

@@ -367,6 +367,32 @@ async fn repo_churn(
     ))
 }
 
+async fn repo_span(
+    State(st): State<Shared>,
+    Path(repo): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Response> {
+    let (f, from, to) = (
+        filters(&q),
+        num_param::<u32>(&q, "from")?,
+        num_param::<u32>(&q, "to")?,
+    );
+    Ok(arrow(
+        blocking(move || st.db.span(&repo, from, to, &f)).await?,
+    ))
+}
+
+async fn repo_renames(
+    State(st): State<Shared>,
+    Path(repo): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Response> {
+    let (from, to) = (num_param::<u32>(&q, "from")?, num_param::<u32>(&q, "to")?);
+    Ok(arrow(
+        blocking(move || st.db.renames(&repo, from, to)).await?,
+    ))
+}
+
 async fn repo_compare(
     State(st): State<Shared>,
     Path(repo): Path<String>,
@@ -493,6 +519,8 @@ pub fn router(state: Shared) -> Router {
         .route("/r/{repo}/events", get(repo_events))
         .route("/r/{repo}/compare", get(repo_compare))
         .route("/r/{repo}/churn", get(repo_churn))
+        .route("/r/{repo}/span", get(repo_span))
+        .route("/r/{repo}/renames", get(repo_renames))
         .route("/r/{repo}/step/{n}", get(repo_step))
         .route("/r/{repo}/commits", get(repo_commits))
         .route("/r/{repo}/search", get(repo_search))

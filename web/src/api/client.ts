@@ -147,6 +147,10 @@ export const api = {
   compare: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/compare?${p}`, signal),
   /** Lines added / deleted per file over (from, to]. */
   churn: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/churn?${p}`, signal),
+  /** Files alive at some step of [from, to], with their lines at `to` (the steady treemap). */
+  span: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/span?${p}`, signal),
+  /** Renames over (from, to]: step, path_id, old_path_id. */
+  renames: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/renames?${p}`, signal),
   /** The keys an area query labels, best first (key, label). */
   keys: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/keys?${p}`, signal),
   /** Per file and tracked key: surviving lines (size) or lines changed (flow). */

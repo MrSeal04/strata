@@ -448,7 +448,8 @@ fn check_repo(name: &str) {
         keyframes > 0 || name == "kitchen",
         "{name}: no keyframes, so the keyframe path goes untested"
     );
-    for (sha, want) in git_last_edits(&repo, &gitlinks) {
+    let live_per_step = git_last_edits(&repo, &gitlinks);
+    for (sha, want) in live_per_step.clone() {
         let step = shas[&sha];
         let rows = state_rows(&db.state(&id, step, &Filters::default()).unwrap());
         let lines: HashMap<u32, i64> = db
@@ -725,7 +726,48 @@ fn check_repo(name: &str) {
         }
     }
 
-    // 8. The query endpoints run.
+    // 8. Span (the steady treemap's reference): exactly the files alive at some step of the
+    //    range, with their lines at its end (0 once deleted).
+    for (a, b) in [
+        (0, last_step),
+        (last_step / 2, last_step),
+        (1, last_step / 2),
+    ] {
+        let mut want: HashMap<String, i64> = HashMap::new();
+        for (sha, live) in &live_per_step {
+            let st = shas[sha];
+            if st >= a && st <= b {
+                for p in live.keys() {
+                    want.insert(p.clone(), 0);
+                }
+            }
+        }
+        let end: HashMap<u32, i64> = db
+            .with(&id, |c, s| {
+                let mut stmt = c.prepare(&state_sql_for_test(s, b))?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get::<_, u32>(0)?, r.get::<_, i64>(1)?)))?;
+                Ok(rows.collect::<Result<_, _>>()?)
+            })
+            .unwrap();
+        for (pid, lines) in &end {
+            if let Some(w) = want.get_mut(&paths[pid]) {
+                *w = *lines;
+            }
+        }
+        let got: HashMap<String, i64> = int_rows(
+            &db.span(&id, a, b, &Filters::default()).unwrap(),
+            &["path_id", "lines_end"],
+        )
+        .into_iter()
+        .map(|r| (paths[&(r[0] as u32)].clone(), r[1]))
+        .filter(|(p, _)| !gitlinks.contains(p))
+        .collect();
+        assert_eq!(got, want, "{name}: span of steps {a}..={b}");
+    }
+    db.renames(&id, 0, last_step).unwrap();
+
+    // 9. The query endpoints run.
     let f = Filters {
         exclude: vec![4, 5, 6, 7],
         ..Default::default()
