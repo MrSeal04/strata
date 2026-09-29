@@ -8,9 +8,13 @@ import { palette } from "../theme";
  */
 export class Categorical {
   private slots = new Map<string, number>();
+  private listeners = new Set<() => void>();
+  /** Bumped whenever a slot is assigned or cleared (cache keys for colors derived from it). */
+  version = 0;
 
   assign(rankedKeys: Iterable<string>) {
     const used = new Set(this.slots.values());
+    const before = this.slots.size;
     for (const k of rankedKeys) {
       if (this.slots.has(k) || k === "(other)" || k === "Other") continue;
       if (used.size >= 8) break;
@@ -19,6 +23,7 @@ export class Categorical {
       this.slots.set(k, slot);
       used.add(slot);
     }
+    if (this.slots.size !== before) this.changed();
   }
 
   slot(key: string): number {
@@ -31,8 +36,25 @@ export class Categorical {
     return s === undefined ? p.other : p.series[s];
   }
 
+  /** Keys holding a slot, in slot order. */
+  keys(): string[] {
+    return [...this.slots.entries()].sort((a, b) => a[1] - b[1]).map(([k]) => k);
+  }
+
   reset() {
+    if (!this.slots.size) return;
     this.slots.clear();
+    this.changed();
+  }
+
+  onChange(fn: () => void): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  private changed() {
+    this.version++;
+    this.listeners.forEach((fn) => fn());
   }
 }
 

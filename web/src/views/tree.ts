@@ -2,13 +2,13 @@ import { type HierarchyNode, type HierarchyRectangularNode, hierarchy, partition
 import type { App } from "../app";
 import { colorMaps } from "../model/colors";
 import { TNode, stableChildren } from "../model/filetree";
+import { fileColor, heat } from "../model/slices";
 import { CanvasPainter } from "../paint/canvas";
 import type { Painter } from "../paint/painter";
 import type { TreeLayout } from "../state/store";
 import { palette } from "../theme";
 import { fmt, h } from "../ui/dom";
 import { tipRow, tooltip } from "../ui/tooltip";
-import { fileColor, heat } from "./treemap";
 import { clock } from "../clock";
 import { renderColorLegend } from "./colorlegend";
 import { View } from "./view";
@@ -115,8 +115,15 @@ export class TreeView extends View {
       this.builtKey = "";
       this.invalidate();
     });
-    app.store.watch((s) => [s.cursor, s.settings.colorBy, s.search?.paths.size, s.settings.actors, s.settings.theme], () => this.invalidate());
-    app.store.watch((s) => [s.settings.colorBy, s.compare, s.langs, s.settings.theme, s.settings.diffColors, s.settings.colorBy === "age" ? s.cursor : 0], () => renderColorLegend(app, this.legend), true);
+    app.store.watch((s) => [s.cursor, s.settings.colorBy, s.search?.paths.size, s.settings.actors, s.settings.theme, s.settings.areaDepth, s.settings.cohortUnit], () => this.invalidate());
+    const legend = () => renderColorLegend(app, this.legend);
+    app.store.watch((s) => [s.settings.colorBy, s.compare, s.langs, s.authors, s.root, s.settings.areaDepth, s.settings.cohortUnit, s.settings.theme, s.settings.diffColors], legend, true);
+    // The treemap hands out directory colors as it lays out; repaint when it does.
+    colorMaps.dir.onChange(() => {
+      if (app.store.get().settings.colorBy !== "dir") return;
+      legend();
+      this.invalidate();
+    });
   }
 
   private key(): string {

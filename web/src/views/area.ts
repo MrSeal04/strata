@@ -1,7 +1,8 @@
 import { scaleLinear } from "d3";
 import { api, col, filterParams, strCol } from "../api/client";
 import type { App } from "../app";
-import { colorMaps, sequential } from "../model/colors";
+import { colorMaps } from "../model/colors";
+import { bucketOfLabel, cohortColor, cohortRange, cohortUnit } from "../model/slices";
 import type { Painter } from "../paint/painter";
 import type { AreaSlice } from "../state/store";
 import { palette } from "../theme";
@@ -112,15 +113,6 @@ export class AreaView extends View {
     this.refetch();
   }
 
-  /** "auto": months for young histories, quarters up to ~6 years, years beyond. */
-  private cohortUnit(): string {
-    const u = this.app.store.get().settings.cohortUnit;
-    if (u !== "auto") return u;
-    const tl = this.app.tl;
-    const years = (tl.time(tl.n - 1) - tl.time(0)) / (365.25 * 86400);
-    return years < 2 ? "month" : years < 6 ? "quarter" : "year";
-  }
-
   refetch() {
     const s = this.app.store.get();
     if (!s.repo || this.width < 10) return;
@@ -135,7 +127,7 @@ export class AreaView extends View {
     p.set("slice", st.areaSlice);
     p.set("mode", st.areaMode);
     p.set("depth", String(st.areaDepth));
-    p.set("unit", this.cohortUnit());
+    p.set("unit", cohortUnit(this.app));
     p.set("top", "8");
     const key = p.toString();
     if (this.data?.key === key) return;
@@ -226,9 +218,10 @@ export class AreaView extends View {
     if (!d) return palette().other;
     if (key === "(other)") return palette().other;
     if (d.slice === "cohort") {
-      const ks = d.series.filter((s) => s.key !== "(other)").map((s) => s.key);
-      const i = ks.indexOf(key);
-      return sequential(ks.length <= 1 ? 0.7 : 0.15 + (0.85 * i) / (ks.length - 1));
+      // Placed by time, like the treemap's cohort colors.
+      const unit = cohortUnit(this.app);
+      const [first, last] = cohortRange(this.app, unit);
+      return cohortColor(bucketOfLabel(key, unit), first, last);
     }
     return this.colorMap(d.slice)!.color(key);
   }

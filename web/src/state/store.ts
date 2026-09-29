@@ -6,7 +6,7 @@ export type BarScale = "linear" | "sqrt" | "log";
 export type AreaSlice = "dir" | "lang" | "author" | "cohort";
 export type AreaMode = "size" | "flow";
 export type TreeLayout = "force" | "radial" | "sunburst" | "icicle";
-export type ColorBy = "lang" | "heat" | "age" | "author";
+export type ColorBy = "lang" | "dir" | "author" | "cohort" | "heat";
 
 export interface Settings {
   axis: AxisMode;
@@ -188,6 +188,8 @@ export function settingsFromSaved(saved: Record<string, unknown>): Partial<Setti
   const { v, ...rest } = saved;
   // Version 1 saved every value, so its "radial" tree layout is the old default, not a choice.
   if (v === undefined && rest.treeLayout === "radial") delete rest.treeLayout;
+  // "Line age" (one mean-age color per file) became "when written" (cohorts).
+  if (rest.colorBy === "age") rest.colorBy = "cohort";
   return rest as Partial<Settings>;
 }
 

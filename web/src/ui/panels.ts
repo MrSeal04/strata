@@ -51,7 +51,7 @@ export function openSettings(app: App, anchor: HTMLElement) {
     row("Cohort unit", select("cohortUnit", [["auto", "auto"], ["year", "year"], ["quarter", "quarter"], ["month", "month"]])),
     h("h3", { text: "Tree and treemap" }),
     row("Tree layout", select("treeLayout", [["force", "force-directed"], ["radial", "radial tree"], ["sunburst", "sunburst"], ["icicle", "icicle"]])),
-    row("Color by", select("colorBy", [["lang", "language"], ["heat", "recent activity"], ["age", "line age"], ["author", "top author"]])),
+    row("Color by", select("colorBy", [["dir", "directory"], ["lang", "language"], ["author", "author"], ["cohort", "when written"], ["heat", "recent activity"]])),
     row("Author actors", check("actors"), "Gource-style: authors fly to the files they touch (radial / force layouts)"),
     row("Gravatar images", check("gravatar"), "Loads avatars from gravatar.com using a SHA-256 hash of each email (off by default)"),
     row("Node budget", num("nodeBudget", 200, 50000, 100), "Deeper folders collapse above this many nodes"),

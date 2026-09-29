@@ -98,6 +98,8 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
   };
   const unsubs = [
     store.watch((s) => s.filterRev, () => sync.reset()),
+    // Directory keys are relative to the root at a depth: a new root or depth is a new key space.
+    store.watch((s) => [s.root, s.settings.areaDepth], () => colorMaps.dir.reset()),
     store.watch((s) => s.cursor, (c) => void sync.goto(c)),
     store.watch((s) => s.settings, (s) => saveSettings(repo, s)),
     store.watch((s) => [s.settings.theme, s.settings.diffColors], () => applyTheme(store.get().settings.theme, store.get().settings.diffColors)),

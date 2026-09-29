@@ -1,8 +1,9 @@
 import { type HierarchyRectangularNode, hierarchy, treemap, treemapBinary } from "d3";
 import type { App } from "../app";
 import { clock } from "../clock";
-import { colorMaps, diverging, inkOn, mix, sequential } from "../model/colors";
+import { colorMaps, inkOn } from "../model/colors";
 import { type FileTree, type TNode, stableChildren } from "../model/filetree";
+import { COLOR_BY_LABEL, assignDirColors, cohortUnit, fileColor, growthColor, heat } from "../model/slices";
 import { GlRects } from "../paint/glrects";
 import type { Painter } from "../paint/painter";
 import type { ColorBy } from "../state/store";
@@ -20,78 +21,6 @@ interface Rect {
 }
 
 type LNode = HierarchyRectangularNode<TNode>;
-
-/** Shared per-file coloring for the treemap and the tree. */
-/** Language color per path id, rebuilt when the palette changes (a 100k-file frame asks a lot). */
-let langCache: { pal: unknown; colors: string[] } = { pal: null, colors: [] };
-
-function langColor(app: App, pathId: number): string {
-  const pal = palette();
-  if (langCache.pal !== pal || langCache.colors.length !== app.paths.lang.length) {
-    const byLang = new Map<string, string>();
-    langCache = {
-      pal,
-      colors: app.paths.lang.map((l) => {
-        const key = l || "Other";
-        let c = byLang.get(key);
-        if (c === undefined) {
-          c = colorMaps.lang.color(key);
-          byLang.set(key, c);
-        }
-        return c;
-      }),
-    };
-  }
-  return langCache.colors[pathId] ?? pal.other;
-}
-
-export function fileColor(app: App, node: TNode, mode: ColorBy, now: number): string {
-  const pal = palette();
-  const f = node.file;
-  if (!f) return pal.dir;
-  if (app.store.get().compare && app.compare.data) return growthColor(app, f.pathId);
-  switch (mode) {
-    case "lang":
-      return langColor(app, f.pathId);
-    case "author":
-      return f.topAuthor < 0 ? pal.other : colorMaps.author.color(app.authorName(f.topAuthor));
-    case "age": {
-      const t0 = app.tl.time(0);
-      const t1 = app.tl.time(app.store.get().cursor);
-      return f.mot > 0 ? sequential((f.mot - t0) / Math.max(1, t1 - t0)) : pal.other;
-    }
-    case "heat": {
-      const k = heat(app, f.touched, now);
-      if (k <= 0.01) return pal.surface3;
-      const hue = f.lastDels > f.lastAdds ? pal.del : pal.add;
-      return mix(pal.surface3, hue, k);
-    }
-  }
-}
-
-/** Compare mode: born = additions color, died = deletions color, otherwise diverging on log2(B/A). */
-export function growthColor(app: App, pathId: number): string {
-  const pal = palette();
-  const d = app.compare.data!;
-  const a = d.linesA.get(pathId) ?? 0;
-  const b = d.linesB.get(pathId) ?? 0;
-  if (a === 0 && b > 0) return pal.add;
-  if (b === 0 && a > 0) return pal.del;
-  return diverging(Math.log2((b + 1) / (a + 1)) / 3);
-}
-
-/** 1 when a file was just touched, decaying to 0 over `heatSeconds` of playback. */
-let heatSteps = { key: -1, steps: 1 };
-
-export function heat(app: App, touched: number, pos: number): number {
-  if (touched < 0) return 0;
-  const age = pos - touched;
-  if (age < -0.5) return 0;
-  // The decay length is the same for every file in a frame; compute it once per ~frame.
-  const key = Math.floor(clock.now() / 8);
-  if (heatSteps.key !== key) heatSteps = { key, steps: Math.max(0.5, app.store.get().settings.heatSeconds * app.stepsPerSecond()) };
-  return Math.exp(-Math.max(0, age) / heatSteps.steps);
-}
 
 interface Pane {
   key: string;
@@ -124,6 +53,8 @@ export class TreemapView extends View {
   private moving = false;
   private lastFrame = 0;
   private modeSel: HTMLSelectElement;
+  private showSel: HTMLSelectElement;
+  private extraSel: HTMLSelectElement;
   /** WebGL layer for the rect fills of large treemaps (null without WebGL2). */
   private gl: GlRects | null = null;
   private glActive = false;
@@ -149,10 +80,25 @@ export class TreemapView extends View {
       const c = app.store.get().compare;
       if (c) app.store.set({ compare: { ...c, mode: this.modeSel.value as "overlay" | "side" } });
     });
+    // What the squares show: the area chart's slices plus activity, with the slice's granularity.
+    this.showSel = h("select", { "aria-label": "Show" }, ...(Object.keys(COLOR_BY_LABEL) as ColorBy[]).map((k) => h("option", { value: k, text: `by ${COLOR_BY_LABEL[k]}` })));
+    this.showSel.addEventListener("change", () => app.store.setSettings({ colorBy: this.showSel.value as ColorBy }));
+    this.extraSel = h("select", { "aria-label": "Granularity" });
+    this.extraSel.addEventListener("change", () => {
+      const v = this.extraSel.value;
+      if (app.store.get().settings.colorBy === "cohort") app.store.setSettings({ cohortUnit: v as "auto" | "year" | "quarter" | "month" });
+      else app.store.setSettings({ areaDepth: Number(v) });
+    });
+    this.addControl(this.showSel);
+    this.addControl(this.extraSel);
     this.addControl(this.modeSel);
-    app.store.watch((s) => [s.cursor, s.settings.colorBy, s.search?.paths.size, s.settings.theme, s.settings.diffColors], () => this.invalidate());
-    app.store.watch((s) => [s.settings.colorBy, s.compare, s.langs, s.settings.theme, s.settings.diffColors, s.settings.colorBy === "age" ? s.cursor : 0], () => renderColorLegend(app, this.legend), true);
-    app.store.watch((s) => [s.root, s.compare, s.filterRev], () => {
+    app.store.watch((s) => [s.cursor, s.settings.colorBy, s.search?.paths.size, s.settings.theme, s.settings.diffColors, s.settings.areaDepth, s.settings.cohortUnit], () => this.invalidate());
+    const legend = () => renderColorLegend(app, this.legend);
+    app.store.watch((s) => [s.settings.colorBy, s.compare, s.langs, s.authors, s.root, s.settings.areaDepth, s.settings.cohortUnit, s.settings.theme, s.settings.diffColors], legend, true);
+    colorMaps.dir.onChange(() => {
+      if (app.store.get().settings.colorBy === "dir") legend();
+    });
+    app.store.watch((s) => [s.root, s.compare, s.filterRev, s.settings.colorBy, s.settings.areaDepth, s.settings.cohortUnit], () => {
       this.layoutKey = "";
       this.updateTitle();
       this.invalidate();
@@ -165,12 +111,25 @@ export class TreemapView extends View {
 
   private updateTitle() {
     const s = this.app.store.get();
+    const st = s.settings;
     const t = this.head.querySelector("h2")!;
     t.textContent = s.compare
       ? `Files: #${fmt.int(s.compare.a + 1)} → #${fmt.int(s.compare.b + 1)}`
       : `Files by size${s.root ? ` · ${s.root}/` : ""}`;
     this.modeSel.style.display = s.compare ? "" : "none";
     if (s.compare) this.modeSel.value = s.compare.mode;
+    // Compare colors by growth, so the slice controls step aside.
+    this.showSel.style.display = s.compare ? "none" : "";
+    this.showSel.value = st.colorBy;
+    const opts: [string, string][] =
+      st.colorBy === "cohort"
+        ? [["auto", `auto (${cohortUnit(this.app)})`], ["year", "per year"], ["quarter", "per quarter"], ["month", "per month"]]
+        : st.colorBy === "dir"
+          ? Array.from({ length: Math.max(3, st.areaDepth) }, (_, i): [string, string] => [String(i + 1), `depth ${i + 1}`])
+          : [];
+    this.extraSel.replaceChildren(...opts.map(([v, text]) => h("option", { value: v, text })));
+    this.extraSel.style.display = opts.length && !s.compare ? "" : "none";
+    this.extraSel.value = st.colorBy === "cohort" ? st.cohortUnit : String(st.areaDepth);
   }
 
   /** Which trees to lay out, and where. */
@@ -241,6 +200,8 @@ export class TreemapView extends View {
       visit(r);
       return { ...spec, root: r, nodes };
     });
+    // Directory colors go to the largest keys shown (the area chart ranks the same way).
+    if (s.settings.colorBy === "dir" && !s.compare && this.panes[0]?.root) assignDirColors(this.app, this.panes[0].root.data);
     this.layoutKey = this.currentKey();
     this.layoutAt = clock.now();
   }
@@ -293,7 +254,8 @@ export class TreemapView extends View {
     const comparing = !!(s.compare && this.app.compare.data);
     // Nothing moved and no color input changed: reuse last frame's batches; only the activity
     // rings (a few recently touched files) are recomputed. Most playback frames at scale.
-    const colorKey = `${this.layoutKey}|${colorBy}|${s.settings.theme}|${s.settings.diffColors}|${comparing}|${this.app.compare.data?.key ?? ""}|${s.search?.q ?? ""}|${colorBy === "age" ? s.cursor : colorBy === "heat" ? pos : ""}`;
+    const sliceKey = colorBy === "dir" ? `${s.settings.areaDepth}:${colorMaps.dir.version}` : colorBy === "cohort" ? cohortUnit(this.app) : colorBy === "heat" ? pos : "";
+    const colorKey = `${this.layoutKey}|${colorBy}|${s.settings.theme}|${s.settings.diffColors}|${comparing}|${this.app.compare.data?.key ?? ""}|${s.search?.q ?? ""}|${sliceKey}`;
     const reuse = !this.geomMoving && k < 1 && this.frame?.key === colorKey;
     let geom = false;
     let dirs: number[];
