@@ -578,7 +578,8 @@ playback layout:
   slots go to those authors by surviving lines instead of the top committers. The breakdown is
   a `StateSync` layer (`model/composition.ts`) loaded with `/state` and advanced from `/origins`
   chunks, so it never disagrees with the tree.
-- **Last edited:** a thermal ramp on a log time scale from the cursor. `edited` is the step that
+- **Last edited:** yellow (just edited) through orange to deep red (untouched longest), on a log
+  time scale from the cursor. `edited` is the step that
   last changed a file's content; a pure move keeps its source's (the store derives
   `rename_edits`, ~20k rows on Linux, once per load). No re-extraction.
 - **Sized by lines changed:** every text file changed from the range start to the cursor, deleted

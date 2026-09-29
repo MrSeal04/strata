@@ -1,7 +1,7 @@
 // What a file "is" under each way of slicing the repo (directory, language, author, cohort),
 // and the one color for it, so the treemap, the tree, the legends and the area chart agree.
 
-import { interpolateTurbo } from "d3";
+import { interpolateYlOrRd } from "d3";
 import type { App } from "../app";
 import { clock } from "../clock";
 import type { ColorBy } from "../state/store";
@@ -136,14 +136,14 @@ function dirColor(app: App, pathId: number): string {
 }
 
 /**
- * "Last edited": a thermal ramp on a log time scale, red for just edited through yellow and
- * green to blue for long ago. The scale runs from an hour to the history's age at the cursor
- * (at least a month), so a young repo still spans the ramp. 64 steps keep batches few.
+ * "Last edited": yellow for just edited, through orange to deep red for untouched a long time,
+ * on a log time scale. The scale runs from an hour to the history's age at the cursor (at least
+ * a month), so a young repo still spans the ramp. 64 steps keep batches few.
  */
 const HEAT_STEPS = 64;
 const HEAT_RAMP = Array.from({ length: HEAT_STEPS }, (_, i) => {
-  // Turbo's darkest ends vanish against the surfaces; stay inside them.
-  const c = interpolateTurbo(0.93 - (0.85 * i) / (HEAT_STEPS - 1));
+  // YlOrRd's palest yellow vanishes against light surfaces; start at a saturated one.
+  const c = interpolateYlOrRd(0.24 + (0.71 * i) / (HEAT_STEPS - 1));
   const m = /(\d+),\s*(\d+),\s*(\d+)/.exec(c);
   return m ? `#${[m[1], m[2], m[3]].map((v) => Number(v).toString(16).padStart(2, "0")).join("")}` : c;
 });
