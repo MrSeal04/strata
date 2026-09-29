@@ -393,9 +393,21 @@ the rest grey). Every color scheme is checked in light and dark themes.
   - Summary table: top growers and shrinkers.
 - **Search:** path, author or message text. Matches glow in every view, and ↑/↓ jump between
   matching steps.
-- **Settings panel:** the exclusion toggles, whitespace mode, bar scale and clamp, axis mode,
-  playback mode and duration, slice and depth, tree layout, color-by, author actors, hide bots,
-  node budget, theme.
+- **Options live where they act** (reworked 2026-09-29):
+  - Each card's header holds that card's options:
+    - bars: scale and outlier clip;
+    - area: slice, depth, mode, and clip in added / deleted mode;
+    - treemap: color-by with granularity and activity glow, measure and layout;
+    - tree: layout, color-by with granularity and glow, node budget, and the author actors and
+      avatars toggles.
+  - The transport holds playback mode, speed and loop.
+  - The filter bar holds file kinds, whitespace and bots.
+  - The settings panel keeps only what spans the dashboard:
+    - axis mode;
+    - theme and add / delete colors;
+    - **Link shared options**, on by default. It makes the tree take the treemap's color-by and
+      the area chart the bars' clipping. Off, each card keeps its own (`treeColorBy`,
+      `areaClampPct`).
 
 ### 7.5 Export
 - **PNG:** any view or the whole dashboard, composited offscreen at 1×, 2× or 4×.

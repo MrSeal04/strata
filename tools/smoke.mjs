@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Smoke test: extract a fixture into a temporary cache, serve it, open the home page and the
-// dashboard at desktop and phone widths, exercise every view mode, playback and zoom, check that
-// phones scroll the page until a card is zoomed, and fail on any page, console or HTTP error.
+// dashboard at desktop and phone widths, exercise every view mode, playback and zoom, the card
+// header options and unlinked cards, check that phones scroll the page until a card is zoomed,
+// and fail on any page, console or HTTP error.
 // Usage: node tools/smoke.mjs [strata-binary] [out-dir]
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync } from "node:fs";
@@ -95,6 +96,37 @@ try {
         a.store.set({ brush: null });
         a.store.setSettings({ colorBy: "lang", treemapMeasure: "size", treemapLayout: "live" });
       });
+      // Every option sits on its card, the gear holds only dashboard-wide ones, and unlinked
+      // cards color and clip on their own (the tree handing out directory colors itself).
+      const problems = await page.evaluate(async () => {
+        const a = window.strata.app;
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const bad = [];
+        const card = (label) => document.querySelector(`.card[aria-label="${label}"] .card-head`);
+        if (card("Additions and deletions per commit").querySelectorAll("select").length !== 2) bad.push("bars header should hold the scale and clip selects");
+        if (![...card("File tree").querySelectorAll("button")].some((b) => b.textContent === "Actors")) bad.push("tree header should hold the Actors toggle");
+        document.querySelector("[aria-label=Settings]").click();
+        const panel = document.querySelector(".panel")?.textContent ?? "";
+        for (const gone of ["Playback", "Tree layout", "Node budget", "Slice by"]) if (panel.includes(gone)) bad.push(`settings panel still offers ${gone}`);
+        if (!panel.includes("Link shared options")) bad.push("settings panel should offer Link shared options");
+        document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+        a.store.setSettings({ linkCards: false, areaSlice: "lang", areaMode: "flow", areaClampPct: 0 });
+        for (const treeColorBy of ["dir", "author", "cohort", "heat"]) {
+          a.store.setSettings({ colorBy: treeColorBy === "dir" ? "lang" : "dir", treeColorBy });
+          await wait(200);
+        }
+        const st = a.store.get().settings;
+        if (st.colorBy !== "dir" || st.treeColorBy !== "heat" || st.clampPct !== 99 || st.areaClampPct !== 0) bad.push(`unlinked settings leaked across cards (${JSON.stringify(st)})`);
+        a.store.setSettings({ treeLayout: "radial", actors: true, nodeBudget: 1000 });
+        a.player.seek(0);
+        a.player.play();
+        await wait(600);
+        a.player.pause();
+        // (every page shares this origin's saved settings: leave the defaults behind)
+        a.store.setSettings({ linkCards: true, colorBy: "lang", treeColorBy: "lang", areaSlice: "dir", areaMode: "size", clampPct: 99, treeLayout: "force", actors: false, nodeBudget: 6000 });
+        return bad;
+      });
+      failures.push(...problems.map((p) => `${name}: ${p}`));
       await new Promise((r) => setTimeout(r, 800));
     }
     await page.screenshot({ path: join(out, `${name}.png`) });
