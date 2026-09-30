@@ -360,14 +360,16 @@ fn verify_blame(db: &Db, meta: &strata_store::RepoMeta, n: usize) -> anyhow::Res
     paths.sort();
     let step = (paths.len() / n.max(1)).max(1);
     let sample: Vec<&String> = paths.iter().step_by(step).take(n).copied().collect();
-    let (mut agree, mut total, mut files_exact) = (0i64, 0i64, 0usize);
+    let (mut agree, mut total, mut files_exact, mut failed) = (0i64, 0i64, 0usize, 0usize);
     for path in &sample {
+        // -C, not --git-dir: a local source's git_dir is its work tree, not its .git.
         let out = std::process::Command::new("git")
-            .arg("--git-dir")
+            .arg("-C")
             .arg(&meta.git_dir)
             .args(["blame", "-w", "--line-porcelain", &meta.head, "--", path])
             .output()?;
         if !out.status.success() {
+            failed += 1;
             continue;
         }
         let mut theirs: HashMap<String, i64> = HashMap::new();
@@ -392,11 +394,19 @@ fn verify_blame(db: &Db, meta: &strata_store::RepoMeta, n: usize) -> anyhow::Res
         total += lines;
         files_exact += usize::from(same == lines && mine.values().sum::<i64>() == lines);
     }
+    if failed == sample.len() {
+        anyhow::bail!("blame check: git blame failed on all {failed} sampled files");
+    }
     println!(
-        "blame check     {} files: {:.2}% of lines credited to the same author as git blame -w; {} files exact",
-        sample.len(),
+        "blame check     {} files: {:.2}% of lines credited to the same author as git blame -w; {} files exact{}",
+        sample.len() - failed,
         100.0 * agree as f64 / total.max(1) as f64,
-        files_exact
+        files_exact,
+        if failed > 0 {
+            format!(" ({failed} skipped: git blame failed)")
+        } else {
+            String::new()
+        }
     );
     Ok(())
 }
