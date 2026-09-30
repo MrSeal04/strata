@@ -2,8 +2,8 @@
 # and SHA256SUMS, uploaded to a draft release whose notes are written by hand before publishing.
 # Run it by hand (workflow_dispatch) to build and test without releasing.
 #
-# The build runs in an ubuntu:22.04 container so the glibc floor is 2.35: the .deb installs on
-# Ubuntu 22.04+ and Debian 12+. Compiling DuckDB takes most of the ~30 minutes.
+# The build runs in an ubuntu:22.04 container, so the glibc floor is at most 2.35 (0.1.4 needs 2.34):
+# the .deb installs on Ubuntu 22.04+ and Debian 12+. Compiling DuckDB takes most of the ~21 minutes.
 name: Release
 
 on:
