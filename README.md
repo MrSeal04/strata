@@ -22,7 +22,10 @@ One timeline drives all four views. You can play it back (fixed length, commits 
 days per second), scrub, brush a range, search, filter by category, language or author, compare
 two points, and export PNG, SVG, MP4 or GIF.
 
-![](docs/dashboard.png)
+![The strata dashboard on the Linux kernel at v7.3-rc1, dark theme](docs/dashboard.png)
+
+*The Linux kernel at v7.3-rc1 (77,000 first-parent commits): files colored by how long ago their content
+was last edited, yellow for the merge window just closed through deep red for code untouched for years.*
 
 ## Quick start
 
