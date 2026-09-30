@@ -27,5 +27,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # Registry only: a restored target/ replays libduckdb-sys's build output, which points the
+      # linker at target/duckdb-download, and that isn't cached ("unable to find library -lduckdb").
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       - run: make check
