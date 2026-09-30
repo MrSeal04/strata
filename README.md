@@ -32,15 +32,17 @@ make install              # -> ~/.local/bin/strata (+ ~/.local/lib/strata/libduc
 
 strata ~/Projects/myrepo                       # extract, serve, open the browser
 strata https://github.com/git/git              # clones into the cache first
-strata ssh://git@git.example.com:2222/you/project.git
+strata ssh://git@git.example.com/you/project.git
 ```
+
+Building needs Rust 1.88 or newer, Node.js 22.12 or newer with npm, and `git` on the `PATH`.
+The first build downloads a prebuilt `libduckdb`.
 
 Re-running is incremental: only commits since the last run are processed.
 
 Or skip the build: each [release](https://github.com/MrSeal04/strata/releases) ships a
 self-contained Linux x86-64 binary with DuckDB compiled in (no `libduckdb.so` needed), and the
-same binary as a `.deb`. The `.deb` is also published to an apt repository on the Forgejo server,
-so `apt upgrade` picks up new releases; the release notes have the one-time setup.
+same binary as a `.deb`.
 
 ## CLI
 
@@ -108,7 +110,7 @@ Categories are `source`, `docs`, `data`, `notebook`, `lockfile`, `vendored`, `ge
 `binary` and `submodule`. Lockfiles, vendored, generated and binary files are hidden by default,
 and each one is a toggle in the filter row.
 
-## Benchmarks (desktop, 12 threads)
+## Benchmarks (12-thread desktop)
 
 | Repo | First-parent commits | Extract | Peak memory (anon) | Cache | Slowest query p95 |
 |---|---|---|---|---|---|
@@ -120,7 +122,7 @@ Linux notes:
 - The extraction was interrupted at step 60,771 and resumed on a newer engine. The first 60,771
   steps took ~25 minutes; the last 16,423 took 10.6 minutes with parallel blame fallbacks.
 - Merge attribution agreed with `git blame -w HEAD` for 90.1% of lines on 20 sampled files.
-- Dashboard playback runs at ~17 fps in Chrome on the desktop GPU (WebGL treemap layer, ~60k
+- Dashboard playback runs at ~17 fps in Chrome on a desktop GPU (WebGL treemap layer, ~60k
   cells), measured while other jobs held the machine at load average 15.
 
 ## Development
@@ -135,7 +137,13 @@ node tools/shot.mjs URL out.png [w] [h] [waitMs] [--dark] [--selector CSS] [--ev
 Dev builds link the prebuilt `libduckdb` (`DUCKDB_DOWNLOAD_LIB=1` in `.cargo/config.toml`).
 `make bundled` compiles DuckDB into the binary instead, producing `target/strata-bundled`: one
 self-contained 69 MB executable (DuckDB's debug info is stripped; unstripped it is over 1 GB),
-with no `libduckdb.so` needed at runtime. It took 27 minutes on the desktop with 3 compile jobs; each
+with no `libduckdb.so` needed at runtime. It takes about 27 minutes with 3 compile jobs; each
 DuckDB compiler process uses 1–1.5 GB, so keep `CARGO_BUILD_JOBS` low on a busy machine.
 `make deb` packages it as `target/strata_<version>_amd64.deb` (`tools/make-deb.sh`), with the
 library dependencies derived by `dpkg-shlibdeps`.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The language table (`crates/strata-engine/src/langs_table.rs`) is
+generated from [github-linguist](https://github.com/github-linguist/linguist) data vendored in
+`tools/vendor/`, also MIT ([LICENSE-linguist](tools/vendor/LICENSE-linguist)).

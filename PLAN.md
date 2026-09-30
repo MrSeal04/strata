@@ -7,7 +7,7 @@ It has to handle repos from 50 commits up to Linux-kernel scale (1M+ commits).
 ```
 strata ~/Projects/myrepo                        # extract (incrementally) + serve + open the browser
 strata https://github.com/torvalds/linux       # clone into the cache, then the same
-strata ssh://git@git.example.com:2222/you/project.git
+strata ssh://git@git.example.com/you/project.git
 ```
 
 ---
@@ -18,7 +18,7 @@ strata ssh://git@git.example.com:2222/you/project.git
 |---|---|
 | Views | All four: **stacked area**, **per-commit +/- bars**, **animated file tree**, **evolving treemap** |
 | Audience | Personal exploration, sharing/showing off, and serious codebase analysis. Accuracy *and* polish both matter |
-| Repo sources | Local clones, public GitHub URLs, Forgejo repos (treated as plain git URLs, no Forgejo API) |
+| Repo sources | Local clones, public GitHub URLs, self-hosted servers such as Forgejo (treated as plain git URLs, no host API) |
 | Form | **Local web app**: one CLI binary extracts the data, serves the UI and opens the browser. Runs on whatever machine launched it |
 | Time axis | Toggle between **calendar time** and **commit index** |
 | Slice by | **Directory**, **language/file type**, **author** |
@@ -45,7 +45,7 @@ strata ssh://git@git.example.com:2222/you/project.git
 | First milestone | **Vertical slice of all four views**, rough, then deepen |
 | Identities | Respect `.mailmap`, auto-merge heuristics with per-repo overrides, flag bots |
 | Name | **strata** |
-| VCS | Git, committed incrementally and pushed to Forgejo (`strata`) |
+| VCS | Git, committed incrementally |
 
 ### Calls I made myself (override any of them)
 
@@ -134,7 +134,7 @@ In release builds the web app is built by Vite and embedded into the binary (`ru
 strata [<path|url>]                     extract incrementally, then serve and open the browser
 strata extract <path|url> [--full] [--branch main] [--threads N]
                [--merge-attribution blame|merger] [--survival-ws ignore|strict]
-               [--progress json]         machine-readable progress on stderr (for the status panel)
+               [--progress json]         machine-readable progress on stderr (for wrappers and dashboards)
 strata serve [--port 7420] [--no-open]  serve every cached repo; the UI has a repo picker + "add URL"
 strata render <repo> --view dashboard|treemap|tree|area|bars --mode fixed:60s|commits:30/s|calendar:7d/s
               --size 1920x1080 --fps 60 --format mp4|gif [--from <rev|date>] [--to ...] -o out.mp4
@@ -142,7 +142,7 @@ strata list | strata gc [--older-than 90d] | strata bench <repo>
 ```
 
 URLs are mirrored into `~/.cache/strata/clones/<host>/<path>.git` with `git clone --mirror`, and
-`git fetch` on re-runs. Forgejo is just `ssh://git@git.example.com:2222/you/<repo>.git`.
+`git fetch` on re-runs. A self-hosted server is just another git URL.
 Private GitHub works through the user's existing git credentials.
 
 ---
@@ -235,11 +235,11 @@ The tracker is the heart of the survival, line-age and top-author features.
 identity merges and splits, bot list additions, classification overrides (globs → category), the
 default branch, and default UI settings.
 
-### 4.9 Progress and the status panel
-`--progress json` emits `{steps_done_this_run, steps_total_this_run, phase, eta_s}` lines. The ETA
-comes from the engine, which knows its phase mix. Long runs (the Linux benchmark) are published to
-the "Working on" panel from a 30 s heartbeat wrapper. `--step` counts only steps finished in this
-run, and `--eta` comes from the engine, never a straight line from counts.
+### 4.9 Progress
+`--progress json` emits `{steps_done_this_run, steps_total_this_run, phase, eta_s}` lines, so a
+wrapper can mirror a long run (the Linux benchmark) on a dashboard. The counts cover only steps
+finished in this run, and the ETA comes from the engine, which knows its phase mix, never a
+straight line from counts.
 
 ---
 
@@ -449,13 +449,13 @@ the rest grey). Every color scheme is checked in light and dark themes.
 ### Benchmark corpus
 | Tier | Repos | Purpose |
 |---|---|---|
-| small | this repo and a couple of small self-hosted repos | daily dev loop, <5 s end to end |
+| small | this repo and a couple of small personal repos | daily dev loop, <5 s end to end |
 | mid | git/git, cpython | merge-heavy and long histories, rename and subtree edge cases |
 | huge | torvalds/linux | the scale target |
 
 **Targets** (to be validated in M3, not promises):
-- Linux full extraction in ≤ 60 min on the desktop, with peak RSS ≤ 4 GB (only ~6 GB is free
-  day-to-day on this machine).
+- Linux full extraction in ≤ 60 min on a desktop, with peak RSS ≤ 4 GB (the development machine
+  has only ~6 GB free day-to-day).
 - Every UI query returns in ≤ 300 ms p95 on Linux.
 - Playback holds 60 fps on the 5k-commit tier and ≥ 30 fps on Linux with LOD.
 
@@ -463,14 +463,13 @@ the rest grey). Every color scheme is checked in light and dark themes.
 
 ## 9. Milestones
 
-Each milestone ends with a working `strata` on real repos, and every step is committed and pushed
-to Forgejo as it lands.
+Each milestone ends with a working `strata` on real repos, and every step is committed as it
+lands.
 
 ### M0: scaffolding
 - `git init`, Cargo workspace with the four crates, Vite + TS project, `.gitignore`, `cargo fmt`,
   `clippy -D warnings`, `tsc --noEmit`, `vitest`, one `make check` (or `just`) target.
 - `fixtures/make.sh` with the first three fixture repos.
-- Push to Forgejo (`strata`).
 
 ### M1: vertical slice, all four views rough (the chosen first milestone)
 - Engine, sequential: first-parent walk, tree diff + renames, imara-diff counts, basic
@@ -496,7 +495,7 @@ to Forgejo as it lands.
 - Parallel diff pipeline with reorder buffer, a tuned memory budget, RLE tracker profiling.
 - Binned/LOD endpoints, Arrow transport, lazy materialized aggregates, result cache.
 - Frontend LOD: canvas culling, node budget, force layout in a worker, chunk prefetch.
-- Benchmarks on cpython, then Linux, run on the status panel. Fix whatever breaks the targets.
+- Benchmarks on cpython, then Linux. Fix whatever breaks the targets.
 
 ### M4: every view and interaction, finished
 - The three tree layouts, author actors, all four color-by modes, heat decay.
@@ -521,7 +520,7 @@ to Forgejo as it lands.
 
 | Risk | Mitigation |
 |---|---|
-| Linux extraction too slow or memory-hungry (desktop has ~6 GB free) | parallel diff, RLE tracker, a bounded reorder buffer, periodic checkpoints (resume instead of restart), `--merge-attribution=merger` fast mode |
+| Linux extraction too slow or memory-hungry (the dev machine has ~6 GB free) | parallel diff, RLE tracker, a bounded reorder buffer, periodic checkpoints (resume instead of restart), `--merge-attribution=merger` fast mode |
 | Blame on big merges dominates runtime | ranged blame limited to the side branch and only added ranges; parallel per file; measured in M3 with fallback to merger mode per merge above a size threshold |
 | Canvas can't hold 60 fps with 80k treemap rects | LOD culling, node budget, dirty-rect redraws; a raw WebGL2 instanced-rect path as a contained escape hatch behind `Painter` |
 | DuckDB queries over ~100M origin-delta rows feel slow | step-sorted row groups, lazy materialized aggregates, a result cache, sending fewer bins while scrubbing |
@@ -569,7 +568,7 @@ Linux (77,194 first-parent steps; the scale target):
 | Extraction ≤ 60 min | Met: ~36 min, plus ~30 min to clone. The run was interrupted once and resumed on a newer engine. |
 | Peak RSS ≤ 4 GB | Met: 1.0–1.6 GB anonymous memory, plus the memory-mapped pack, which is reclaimable. |
 | UI queries ≤ 300 ms p95 | Met at p50: every cold query is at or under ~285 ms (area by author 274 ms, message search 285 ms), and cached calls take < 3 ms. Over it at cold p95: the first area query per slice builds its aggregate once (up to ~490 ms), and message search reaches ~310 ms. Measured at load average ~15. |
-| Playback ≥ 30 fps with LOD | Not met: ~17 fps in Chrome on the desktop GPU with ~60k cells, measured at load average 15. A WebGL treemap layer and LOD got it there from 3.4 fps. |
+| Playback ≥ 30 fps with LOD | Not met: ~17 fps in Chrome on a desktop GPU with ~60k cells, measured at load average 15. A WebGL treemap layer and LOD got it there from 3.4 fps. |
 | Survival within tolerance of blame | git/git 99.1% of lines. Linux 90.1% on 20 files: the most recent 16k steps were extracted before merge-aware replay existed. Re-extract with `--full` to re-check. |
 
 Additions not in the original plan: the WebGL2 treemap layer (§10's escape hatch), per-repo

@@ -1,4 +1,4 @@
-//! Terminal progress: a redrawn status line, or JSON lines for machines (e.g. the status panel).
+//! Terminal progress: a redrawn status line, or JSON lines for machines (wrappers, dashboards).
 
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
