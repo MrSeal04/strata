@@ -82,7 +82,7 @@ turns on verbose logs.
   are credited to the side-branch commits that wrote them. strata replays the side branch's
   edits in process, including merges inside it, memoizing line origins per file version. It runs
   `git blame` limited to the side branch only when a version can't be reached. On git/git this
-  agrees with `git blame -w HEAD` for 99.1% of lines.
+  agrees with `git blame -w HEAD` for 98.5% of lines (90.2% on Linux).
 - **Storage**: Parquet parts per repo, plus a resumable checkpoint. The server loads each repo
   into DuckDB and answers binned, filtered queries as Arrow IPC.
 - **Web app**: vanilla TypeScript, D3 and Canvas, drawing through a painter interface that also
@@ -113,20 +113,20 @@ Categories are `source`, `docs`, `data`, `notebook`, `lockfile`, `vendored`, `ge
 `binary` and `submodule`. Lockfiles, vendored, generated and binary files are hidden by default,
 and each one is a toggle in the filter row.
 
-## Benchmarks (12-thread desktop)
+## Benchmarks
 
-| Repo | First-parent commits | Extract | Peak memory (anon) | Cache | Slowest query p95 |
-|---|---|---|---|---|---|
-| strata (this repo) | 34 | 0.18 s | 57 MB (RSS) | <0.1 MB | 35 ms (area by directory) |
-| git/git | 24,344 | 25.6 s | ~770 MB | 10.8 MB | 47 ms (message search) |
-| torvalds/linux | 77,194 | ~36 min (+ ~30 min clone) | 1.0–1.6 GB | 227 MB | see below |
+strata 0.1.4 on a 12-thread desktop, every repository extracted from scratch out of a local mirror
+(clone time not included) by `strata bench SOURCE --verify 20`:
 
-Linux notes:
-- The extraction was interrupted at step 60,771 and resumed on a newer engine. The first 60,771
-  steps took ~25 minutes; the last 16,423 took 10.6 minutes with parallel blame fallbacks.
-- Merge attribution agreed with `git blame -w HEAD` for 90.1% of lines on 20 sampled files.
-- Dashboard playback runs at ~17 fps in Chrome on a desktop GPU (WebGL treemap layer, ~60k
-  cells), measured while other jobs held the machine at load average 15.
+| Repo | First-parent commits | Extract | Peak memory (anon) | Cache | Slowest cold query p95 | Agrees with `git blame -w` |
+|---|---|---|---|---|---|---|
+| strata (this repo) | 58 | 0.07 s | 61 MB (RSS) | <0.1 MB | 11 ms (area by language) | 100% |
+| git/git | 24,345 | 21.6 s | 804 MB | 12.8 MB | 52 ms (area by cohort) | 98.5% |
+| torvalds/linux | 77,194 | 39 min | 1.8 GB | 226 MB | 250 ms (area by author) | 90.2% |
+
+The last column is the share of surviving lines credited to the same author as
+`git blame -w HEAD`, over 20 sampled files. Linux plays back at 35–40 fps in Chrome on a desktop GPU
+(treemap by language at step 40,000, about 37k files).
 
 ## Development
 

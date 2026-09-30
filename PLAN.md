@@ -569,7 +569,13 @@ Linux (77,194 first-parent steps; the scale target):
 | Peak RSS ≤ 4 GB | Met: 1.0–1.6 GB anonymous memory, plus the memory-mapped pack, which is reclaimable. |
 | UI queries ≤ 300 ms p95 | Met at p50: every cold query is at or under ~285 ms (area by author 274 ms, message search 285 ms), and cached calls take < 3 ms. Over it at cold p95: the first area query per slice builds its aggregate once (up to ~490 ms), and message search reaches ~310 ms. Measured at load average ~15. |
 | Playback ≥ 30 fps with LOD | Not met: ~17 fps in Chrome on a desktop GPU with ~60k cells, measured at load average 15. A WebGL treemap layer and LOD got it there from 3.4 fps. |
-| Survival within tolerance of blame | git/git 99.1% of lines. Linux 90.1% on 20 files: the most recent 16k steps were extracted before merge-aware replay existed. Re-extract with `--full` to re-check. |
+| Survival within tolerance of blame | git/git 99.1% of lines. Linux 90.1% on 20 files, which was put down to the most recent 16k steps predating merge-aware replay. A full re-extract (below) still gives 90.2%, so that isn't the cause. |
+
+Re-measured 2026-09-29 with v0.1.4, a full extract from a local mirror at load ~1
+(`strata bench --verify 20`). Linux: 39.3 min, 1.8 GB peak anonymous memory, 226 MB cache, every
+cold query p95 at or under 250 ms (area by author), so the query target is now met; 90.2% blame
+agreement (12 of 20 files exact). git/git: 21.6 s, 804 MB, slowest cold p95 52 ms, 98.5% (17 of 20
+exact). Why Linux agrees less is still open.
 
 Additions not in the original plan: the WebGL2 treemap layer (§10's escape hatch), per-repo
 lazy aggregates, the query cache, `strata bench --verify` and `tools/smoke.mjs` (make smoke).
