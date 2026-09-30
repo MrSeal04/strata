@@ -1,0 +1,102 @@
+# Release assets for a pushed v* tag: the self-contained binary (DuckDB compiled in), the .deb
+# and SHA256SUMS, uploaded to a draft release whose notes are written by hand before publishing.
+# Run it by hand (workflow_dispatch) to build and test without releasing.
+#
+# The build runs in an ubuntu:22.04 container so the glibc floor is 2.35: the .deb installs on
+# Ubuntu 22.04+ and Debian 12+. Compiling DuckDB takes most of the ~30 minutes.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container: ubuntu:22.04
+    env:
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - name: Build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl dpkg-dev git
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check the tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME, Cargo.toml $version"; exit 1; }
+      - run: make deb
+      - name: Collect assets
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir dist
+          cp target/strata-bundled "dist/strata-$version-x86_64-linux-gnu"
+          cp "target/strata_${version}_amd64.deb" dist/
+          (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+          if ldd "dist/strata-$version-x86_64-linux-gnu" | grep -q libduckdb; then
+            echo "the binary links libduckdb dynamically"; exit 1
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: strata-dist
+          path: dist/
+          if-no-files-found: error
+
+  # Install the .deb on clean systems and run a benchmark, which exercises DuckDB.
+  test:
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:22.04", "ubuntu:24.04", "debian:12-slim", "debian:stable-slim"]
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: strata-dist
+          path: dist
+      - name: Install
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y ./dist/strata_*.deb
+      - name: Extract and query a tiny repository
+        run: |
+          git init -q -b main /tmp/tiny
+          cd /tmp/tiny
+          for i in 1 2 3; do
+            seq 1 $((i * 10)) > "f$i.txt"
+            git add -A
+            git -c user.name=Test -c user.email=test@example.com commit -q -m "commit $i"
+          done
+          STRATA_HOME=/tmp/strata-home strata bench /tmp/tiny
+
+  release:
+    needs: [build, test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: strata-dist
+          path: dist
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --draft --verify-tag --title "strata ${GITHUB_REF_NAME#v}" \
+            --notes "Built by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Notes to follow."
