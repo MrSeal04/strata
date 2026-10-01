@@ -144,9 +144,12 @@ impl Layout {
                 }
             })
             .collect();
+        // A `file:///abs/path` URL leaves an absolute path, which `join` would put outside the
+        // cache (on the source repository itself).
+        let clean = clean.replace("..", "_");
         self.root
             .join("clones")
-            .join(format!("{}.git", clean.replace("..", "_")))
+            .join(format!("{}.git", clean.trim_start_matches('/')))
     }
 
     pub fn read_meta(&self, id: &str) -> anyhow::Result<RepoMeta> {
@@ -201,6 +204,10 @@ mod tests {
         assert_eq!(
             l.clone_dir("ssh://git@git.example.com:2222/you/project.git"),
             PathBuf::from("/c/clones/git.example.com_2222/you/project.git")
+        );
+        assert_eq!(
+            l.clone_dir("file:///srv/git/project.git"),
+            PathBuf::from("/c/clones/srv/git/project.git")
         );
         assert_eq!(Source::parse("git@github.com:a/b.git").unwrap().name(), "b");
         assert!(Source::parse("/definitely/not/here").is_err());
