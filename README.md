@@ -63,7 +63,10 @@ under `clones/`. A private HTTP(S) repository asks for a login: the dashboard sh
 `strata extract` prompts in the terminal. strata keeps the login in memory until it exits and hands
 it to git through a one-off credential helper, so it never reaches the URL, the command line or the
 cache. SSH URLs use your keys and ssh-agent as usual. Ctrl-C (or SIGTERM) during an extraction
-checkpoints and stops, and the next run continues from there.
+checkpoints and stops, and the next run continues from there. In the repo picker each cached repo's
+card shows its size on disk, with **Update** (fetch and extract the new commits, on the branch it
+was extracted from) and **Delete** (its cached data and a URL's clone; a local repository is never
+touched).
 Other environment knobs: `STRATA_BLAME_JOBS` caps concurrent `git blame` fallbacks (default: half
 the CPUs), `STRATA_DUCKDB_MEMORY` caps the server's DuckDB (default 3GB), and `STRATA_LOG=debug`
 turns on verbose logs.
