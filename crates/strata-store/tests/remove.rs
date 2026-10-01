@@ -103,6 +103,12 @@ fn clone_goes_with_its_last_repo() {
         vec![layout.repo_dir(&twin.id), clone.clone()]
     );
     assert!(!clone.exists());
+    let clones = layout.root.join("clones");
+    assert_eq!(
+        std::fs::read_dir(&clones).unwrap().count(),
+        0,
+        "empty parents go too"
+    );
     assert!(src.join(".git/HEAD").exists());
 }
 

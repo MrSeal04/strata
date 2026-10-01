@@ -229,6 +229,19 @@ input[type="range"] { accent-color: var(--accent); }
 .repo-card:hover { border-color: var(--accent); }
 .repo-card .n { font-weight: 600; font-size: 14px; }
 .repo-card .s { color: var(--ink-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The name's link covers the card; the actions sit above it. */
+div.repo-card { position: relative; display: flex; flex-direction: column; }
+.repo-card a.open { color: inherit; text-decoration: none; }
+.repo-card a.open::after { content: ""; position: absolute; inset: 0; border-radius: inherit; }
+.repo-card a.open:focus-visible { outline: none; }
+.repo-card:has(a.open:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+.repo-card .foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: auto; padding-top: 8px; min-height: 32px; }
+.repo-card .foot > .s { flex: 1 1 140px; white-space: normal; }
+.repo-card .foot .bar-track { margin: 2px 0 4px; height: 4px; }
+.repo-card .foot .bar-track + .num { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.repo-card .actions { position: relative; z-index: 1; display: flex; gap: 6px; flex: none; margin-left: auto; }
+.repo-card .actions .btn { height: 24px; padding: 0 8px; font-size: 12px; }
+.btn.danger { background: var(--critical); color: #fff; border-color: var(--critical); }
 .loading-box { max-width: 560px; margin: 80px auto; padding: 0 16px; }
 .bar-track { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; margin: 12px 0 6px; }
 .bar-fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.3s; }

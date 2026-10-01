@@ -76,7 +76,7 @@ export const fmt = {
   ago: (secs: number) => {
     const d = secs / 86400;
     if (d < 1) return "today";
-    if (d < 60) return `${Math.round(d)} days`;
+    if (d < 60) return Math.round(d) === 1 ? "1 day" : `${Math.round(d)} days`;
     if (d < 730) return `${Math.round(d / 30.4)} months`;
     return `${(d / 365.25).toFixed(1)} years`;
   },

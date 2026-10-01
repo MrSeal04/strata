@@ -101,7 +101,7 @@ pub struct Busy {
 
 impl std::fmt::Display for Busy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "another extraction of {} is already running", self.name)
+        write!(f, "an extraction of {} is already running", self.name)
     }
 }
 
@@ -435,6 +435,15 @@ pub fn remove_repo(layout: &Layout, id: &str) -> anyhow::Result<Vec<PathBuf>> {
         if !shared && clone.exists() {
             std::fs::remove_dir_all(&clone)
                 .with_context(|| format!("removing {}", clone.display()))?;
+            // And the host and owner directories it leaves empty.
+            let root = layout.root.join("clones");
+            let mut parent = clone.parent();
+            while let Some(p) = parent.filter(|p| *p != root && p.starts_with(&root)) {
+                if std::fs::remove_dir(p).is_err() {
+                    break;
+                }
+                parent = p.parent();
+            }
             removed.push(clone);
         }
     }

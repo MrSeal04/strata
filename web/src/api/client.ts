@@ -16,6 +16,12 @@ export interface RepoMeta {
   last_run: Record<string, unknown>;
 }
 
+/** A cached repo as `/api/repos` lists it. */
+export interface CachedRepo extends RepoMeta {
+  /** What deleting it frees: the cached tables, plus the clone of a remote. */
+  disk_bytes: number;
+}
+
 export interface JobProgress {
   phase: string;
   done: number;
@@ -125,13 +131,17 @@ export function filterParams(s: State): URLSearchParams {
 const base = (repo: string) => `/api/r/${encodeURIComponent(repo)}`;
 
 export const api = {
-  repos: () => json<{ repos: RepoMeta[]; jobs: JobStatus[] }>("/api/repos"),
+  repos: () => json<{ repos: CachedRepo[]; jobs: JobStatus[] }>("/api/repos"),
   addRepo: (source: string, full = false, login?: Login) =>
     json<JobStatus>("/api/repos", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ source, full, ...login }),
     }),
+  /** Fetch and extract a cached repo again, on the branch it was extracted from. */
+  updateRepo: (repo: string) => json<JobStatus>(`${base(repo)}/update`, { method: "POST" }),
+  /** Delete a cached repo's data (and a remote's clone); a local repository is never touched. */
+  deleteRepo: (repo: string) => json<unknown>(base(repo), { method: "DELETE" }),
   job: (id: string) => json<JobStatus>(`/api/jobs/${id}`),
   cancelJob: (id: string) => json<unknown>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   jobEvents: (id: string) => new EventSource(`/api/jobs/${id}/events`),

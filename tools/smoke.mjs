@@ -2,10 +2,10 @@
 // Smoke test: extract a fixture into a temporary cache, serve it, open the home page and the
 // dashboard at desktop and phone widths, exercise every view mode, playback and zoom, the card
 // header options and unlinked cards, check that phones scroll the page until a card is zoomed,
-// and fail on any page, console or HTTP error.
+// update and then delete the repo from its home card, and fail on any page, console or HTTP error.
 // Usage: node tools/smoke.mjs [strata-binary] [out-dir]
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -162,6 +162,32 @@ try {
     await drag();
     const s2 = await state();
     if (!(s2.y === 0 && s2.ty !== before.ty)) failures.push(`touch: a drag when zoomed should pan the treemap (${JSON.stringify({ before, after: s2 })})`);
+    await page.close();
+  }
+  // Last, since everything above reads kitchen: update it from its home card, then delete it.
+  {
+    const page = await browser.newPage();
+    page.on("pageerror", (e) => failures.push(`manage: page error: ${e.message}`));
+    page.on("console", (m) => m.type() === "error" && failures.push(`manage: console: ${m.text()}`));
+    page.on("response", (r) => r.status() >= 400 && failures.push(`manage: HTTP ${r.status()} ${r.url()}`));
+    await page.setViewport({ width: 1280, height: 800 });
+    await page.goto(`http://127.0.0.1:${port}/#/`, { waitUntil: "networkidle0" });
+    const card = `.repo-card[data-repo="${id}"]`;
+    const click = (text) => page.evaluate((card, text) => [...document.querySelectorAll(`${card} .actions button`)].find((b) => b.textContent === text)?.click(), card, text);
+    await click("Update");
+    await page
+      .waitForFunction((card) => document.querySelector(card)?.textContent.includes("Already up to date"), { timeout: 30000 }, card)
+      .catch(() => failures.push("manage: Update did not report the repo up to date"));
+    await click("Delete");
+    await click("Delete"); // the confirmation
+    await page
+      .waitForFunction((card) => !document.querySelector(card) && document.querySelector(".repos").textContent.includes("No repositories"), { timeout: 10000 }, card)
+      .catch(() => failures.push("manage: Delete did not remove the card"));
+    const meta = await fetch(`http://127.0.0.1:${port}/api/r/${id}/meta`);
+    if (meta.status !== 404) failures.push(`manage: /meta after delete is HTTP ${meta.status}`);
+    if (existsSync(join(home, "repos", id))) failures.push("manage: the cache directory survived");
+    if (!existsSync(join(home, "fixtures/kitchen/.git/HEAD"))) failures.push("manage: delete touched the repository");
+    await page.screenshot({ path: join(out, "home-deleted.png") });
     await page.close();
   }
   await browser.close();
