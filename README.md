@@ -31,7 +31,7 @@ was last edited, yellow for the merge window just closed through deep red for co
 
 ```sh
 make                      # builds the web app and target/release/strata
-make install              # -> ~/.local/bin/strata (+ ~/.local/lib/strata/libduckdb.so)
+make install              # -> ~/.local/bin/strata (+ libduckdb.so and an app launcher entry)
 
 strata ~/Projects/myrepo                       # extract, serve, open the browser
 strata https://github.com/git/git              # clones into the cache first
@@ -45,7 +45,7 @@ Re-running is incremental: only commits since the last run are processed.
 
 Or skip the build: each [release](https://github.com/MrSeal04/strata/releases) ships a
 self-contained Linux x86-64 binary with DuckDB compiled in (no `libduckdb.so` needed), and the
-same binary as a `.deb`.
+same binary as a `.deb`, which also adds strata to the app launcher.
 
 ## CLI
 
@@ -54,6 +54,7 @@ same binary as a `.deb`.
 | `strata [SOURCE]` | Extract `SOURCE` (path or git URL) if needed, serve, and open the dashboard. Without a source it opens the repo picker. |
 | `strata extract SOURCE` | Extract only. `--full` starts over, `--branch B` picks a branch, `--threads N` sets the diff workers, `--merge-attribution blame\|merger` chooses who gets credit for merged lines, `--survival-ws ignore\|strict` sets whitespace handling, `--progress bar\|json\|none` sets the progress format. |
 | `strata serve` | Serve every cached repo (`--port`, `--host`, `--no-open`). |
+| `strata app` | What the app launcher's **strata** entry runs: opens the dashboard in the strata server already running, or starts one that stops 10 minutes after the last dashboard tab closes. |
 | `strata render REPO -o out.mp4` | Record playback headlessly (Chrome, Chromium or Firefox, plus ffmpeg). Options: `--view`, `--duration`, `--fps`, `--scale`, `--size 1600x900`, `--from/--to`, `--theme`, `--color-by`, `--tree-layout`, `--area-slice`, `--actors`. Writes `.mp4`, `.webm` or `.gif`. |
 | `strata list` / `strata gc --older-than 90` | List cached repos, or delete stale ones and their clones. |
 | `strata bench SOURCE` | Time the extraction and every query endpoint. Reports peak memory, cache size, and merge-blame work. `--verify N` checks survival attribution against `git blame -w` on N sampled files. |

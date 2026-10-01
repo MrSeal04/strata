@@ -70,7 +70,11 @@ jobs:
       - name: Install
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y ./dist/strata_*.deb
+          DEBIAN_FRONTEND=noninteractive apt-get install -y ./dist/strata_*.deb desktop-file-utils
+      - name: Launcher entry
+        run: |
+          desktop-file-validate /usr/share/applications/strata.desktop
+          test -f /usr/share/icons/hicolor/scalable/apps/strata.svg
       - name: Extract and query a tiny repository
         run: |
           git init -q -b main /tmp/tiny

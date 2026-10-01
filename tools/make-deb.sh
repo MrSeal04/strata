@@ -17,6 +17,9 @@ rm -rf target/deb
 mkdir -p "$root/DEBIAN" "$root/usr/bin" "$root/usr/share/doc/strata"
 install -m755 "$bin" "$root/usr/bin/strata"
 install -m644 README.md "$root/usr/share/doc/strata/README.md"
+# The app launcher entry; desktop-file-utils and hicolor-icon-theme refresh their caches by trigger.
+install -Dm644 packaging/strata.desktop "$root/usr/share/applications/strata.desktop"
+install -Dm644 packaging/strata.svg "$root/usr/share/icons/hicolor/scalable/apps/strata.svg"
 
 # dpkg-shlibdeps insists on a debian/control in its working directory.
 work=$(mktemp -d)

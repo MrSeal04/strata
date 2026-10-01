@@ -45,10 +45,14 @@ smoke: web
 fixtures:
 	fixtures/make.sh
 
-# Installs strata and the libduckdb.so it links against (found via $$ORIGIN/../lib/strata).
+# Installs strata, the libduckdb.so it links against (found via $$ORIGIN/../lib/strata) and the
+# app launcher entry (with the full path: a launcher's PATH may lack $(PREFIX)/bin).
 install: build
 	install -Dm755 target/release/strata $(PREFIX)/bin/strata
 	install -Dm644 "$$(ls target/release/deps/libduckdb.so* | head -1)" $(PREFIX)/lib/strata/libduckdb.so
+	install -d $(PREFIX)/share/applications
+	sed 's|^Exec=strata |Exec=$(PREFIX)/bin/strata |' packaging/strata.desktop > $(PREFIX)/share/applications/strata.desktop
+	install -Dm644 packaging/strata.svg $(PREFIX)/share/icons/hicolor/scalable/apps/strata.svg
 	@echo "installed $(PREFIX)/bin/strata"
 
 # Rust API on :7420 + Vite dev server with hot reload on :5173.
