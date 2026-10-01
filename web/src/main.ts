@@ -54,3 +54,11 @@ async function route() {
 
 window.addEventListener("hashchange", route);
 void route();
+
+// Tell the server a page is open: started from the app launcher, it stops once none has been
+// for a while. Browsers may run a hidden tab's timers only once a minute.
+const ping = () => fetch("/api/ping").catch(() => {});
+setInterval(ping, 60_000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") void ping();
+});

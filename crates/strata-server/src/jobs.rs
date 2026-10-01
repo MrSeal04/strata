@@ -72,6 +72,14 @@ impl Jobs {
             .cloned()
     }
 
+    pub fn any_running(&self) -> bool {
+        self.jobs
+            .lock()
+            .unwrap()
+            .values()
+            .any(|j| matches!(j.status.lock().unwrap().state, JobState::Running))
+    }
+
     /// Forget the login remembered for a remote (its repo was deleted).
     pub fn forget_login(&self, url: &str) {
         self.logins.lock().unwrap().remove(url);

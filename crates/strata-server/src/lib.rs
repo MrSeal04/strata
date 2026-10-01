@@ -7,11 +7,12 @@ pub mod render;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, Uri, header};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -41,6 +42,10 @@ pub struct AppState {
     pub jobs: Arc<Jobs>,
     pub extract_opts: ExtractOptions,
     pub renders: render::Renders,
+    /// When the last API request arrived, for `exit_when_idle`.
+    pub last_seen: Mutex<Instant>,
+    /// Stops the server gracefully, as Ctrl-C does.
+    pub shutdown: tokio::sync::Notify,
 }
 
 type Shared = Arc<AppState>;
@@ -130,6 +135,34 @@ fn bins(q: &HashMap<String, String>) -> ApiResult<Bins> {
         hi: num("hi")?,
         bins: num("bins")?.clamp(1.0, 20_000.0) as u32,
     })
+}
+
+/// Open dashboards call this every minute; the launcher checks for a running server with it.
+async fn ping() -> Json<Value> {
+    Json(json!({ "app": "strata", "version": env!("CARGO_PKG_VERSION") }))
+}
+
+/// Note every API request: open pages keep `exit_when_idle` from stopping the server.
+async fn touch(State(st): State<Shared>, req: Request, next: Next) -> Response {
+    *st.last_seen.lock().unwrap() = Instant::now();
+    next.run(req).await
+}
+
+/// Stop the server once no page has called the API for `idle` and no extraction is running.
+/// Hidden tabs may run their once-a-minute ping only that often, so `idle` should be minutes.
+pub fn exit_when_idle(state: Shared, idle: Duration) {
+    tokio::spawn(async move {
+        let tick = (idle / 4).clamp(Duration::from_millis(50), Duration::from_secs(15));
+        loop {
+            tokio::time::sleep(tick).await;
+            let quiet = state.last_seen.lock().unwrap().elapsed();
+            if quiet >= idle && !state.jobs.any_running() {
+                tracing::info!("no page open for {}s: stopping", quiet.as_secs());
+                state.shutdown.notify_one();
+                return;
+            }
+        }
+    });
 }
 
 async fn list_repos(State(st): State<Shared>) -> ApiResult<Json<Value>> {
@@ -581,6 +614,7 @@ fn missing_ui() -> Response {
 
 pub fn router(state: Shared) -> Router {
     let api = Router::new()
+        .route("/ping", get(ping))
         .route("/repos", get(list_repos).post(add_repo))
         .route("/jobs/{id}", get(job_status))
         .route("/jobs/{id}/events", get(job_events))
@@ -606,7 +640,8 @@ pub fn router(state: Shared) -> Router {
         .route("/r/{repo}/commits", get(repo_commits))
         .route("/r/{repo}/search", get(repo_search))
         .route("/r/{repo}/dirs", get(repo_dirs))
-        .merge(render::routes());
+        .merge(render::routes())
+        .route_layer(middleware::from_fn_with_state(state.clone(), touch));
     Router::new()
         .nest("/api", api)
         .fallback(static_asset)
@@ -629,6 +664,8 @@ pub fn app_state(cfg: &ServerConfig) -> anyhow::Result<Shared> {
         jobs: Arc::new(Jobs::default()),
         extract_opts: cfg.extract_opts.clone(),
         renders: render::Renders::default(),
+        last_seen: Mutex::new(Instant::now()),
+        shutdown: tokio::sync::Notify::new(),
     }))
 }
 
@@ -645,9 +682,12 @@ pub async fn bind(
         match tokio::net::TcpListener::bind((cfg.host.as_str(), port)).await {
             Ok(listener) => {
                 let addr = listener.local_addr()?;
-                let app = router(state);
-                let fut = axum::serve(listener, app).with_graceful_shutdown(async {
-                    let _ = tokio::signal::ctrl_c().await;
+                let app = router(state.clone());
+                let fut = axum::serve(listener, app).with_graceful_shutdown(async move {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {}
+                        _ = state.shutdown.notified() => {}
+                    }
                 });
                 return Ok((addr, fut.into_future()));
             }

@@ -48,6 +48,15 @@ enum Cmd {
     },
     /// Serve every cached repo (the UI has a repo picker and an "add URL" box).
     Serve(ServeArgs),
+    /// Open the dashboard from the app launcher: in the strata server already running, or in a
+    /// new one that stops once no dashboard has been open for a while.
+    App {
+        #[arg(long, default_value_t = 7420)]
+        port: u16,
+        /// Seconds without an open dashboard before the server stops
+        #[arg(long, default_value_t = 600, hide = true)]
+        idle_secs: u64,
+    },
     /// List cached repos.
     List,
     /// Delete cached repos (and their clones) not updated for a while.
@@ -158,7 +167,8 @@ fn main() -> anyhow::Result<()> {
     let layout = Layout::new(cli.home.clone().unwrap_or_else(Layout::default_root));
     match cli.cmd {
         Some(Cmd::Extract { source, args }) => cmd_extract(&layout, &source, &args),
-        Some(Cmd::Serve(s)) => serve(layout, None, &cli.extract, &s),
+        Some(Cmd::Serve(s)) => serve(layout, None, &cli.extract, &s, None),
+        Some(Cmd::App { port, idle_secs }) => cmd_app(layout, &cli.extract, port, idle_secs),
         Some(Cmd::List) => cmd_list(&layout),
         Some(Cmd::Gc {
             older_than,
@@ -166,7 +176,13 @@ fn main() -> anyhow::Result<()> {
         }) => cmd_gc(&layout, older_than, dry_run),
         Some(Cmd::Render(r)) => render::run(layout, r),
         Some(Cmd::Bench(b)) => bench::run(layout, b),
-        None => serve(layout, cli.source.as_deref(), &cli.extract, &cli.serve),
+        None => serve(
+            layout,
+            cli.source.as_deref(),
+            &cli.extract,
+            &cli.serve,
+            None,
+        ),
     }
 }
 
@@ -290,11 +306,48 @@ fn cmd_gc(layout: &Layout, days: u64, dry_run: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The launcher's entry: reuse a strata server on `port`, else serve until no page is open.
+fn cmd_app(layout: Layout, extract: &ExtractArgs, port: u16, idle_secs: u64) -> anyhow::Result<()> {
+    if let Some(url) = running_server(port) {
+        eprintln!("strata is already serving on {url}");
+        return Ok(open::that_detached(&url)?);
+    }
+    let s = ServeArgs {
+        port,
+        host: "127.0.0.1".into(),
+        no_open: false,
+    };
+    serve(
+        layout,
+        None,
+        extract,
+        &s,
+        Some(Duration::from_secs(idle_secs)),
+    )
+}
+
+/// The address of a strata server answering on `port` on this machine, if there is one.
+fn running_server(port: u16) -> Option<String> {
+    use std::io::{Read, Write};
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut conn = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).ok()?;
+    conn.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    conn.write_all(b"GET /api/ping HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+        .ok()?;
+    let mut reply = String::new();
+    conn.take(64 << 10).read_to_string(&mut reply).ok()?;
+    reply
+        .contains(r#""app":"strata""#)
+        .then(|| format!("http://127.0.0.1:{port}/"))
+}
+
+/// Serve the dashboard; with `idle`, stop once no page has been open that long.
 fn serve(
     layout: Layout,
     source: Option<&str>,
     extract: &ExtractArgs,
     s: &ServeArgs,
+    idle: Option<Duration>,
 ) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
@@ -349,7 +402,16 @@ fn serve(
                 }
             });
         }
-        eprintln!("strata serving on {url}  (Ctrl-C to stop)");
+        match idle {
+            Some(d) => {
+                strata_server::exit_when_idle(state.clone(), d);
+                eprintln!(
+                    "strata serving on {url}  (stops {} min after the last dashboard closes)",
+                    d.as_secs().div_ceil(60)
+                );
+            }
+            None => eprintln!("strata serving on {url}  (Ctrl-C to stop)"),
+        }
         if !s.no_open {
             let u = url.clone();
             tokio::spawn(async move {
