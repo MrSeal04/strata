@@ -72,6 +72,11 @@ impl Jobs {
             .cloned()
     }
 
+    /// Forget the login remembered for a remote (its repo was deleted).
+    pub fn forget_login(&self, url: &str) {
+        self.logins.lock().unwrap().remove(url);
+    }
+
     pub fn all(&self) -> Vec<JobStatus> {
         self.jobs
             .lock()

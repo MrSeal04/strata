@@ -3165,6 +3165,7 @@ dependencies = [
  "anyhow",
  "axum",
  "futures-util",
+ "http-body-util",
  "rust-embed",
  "serde",
  "serde_json",
@@ -3173,6 +3174,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tower",
  "tower-http",
  "tracing",
 ]

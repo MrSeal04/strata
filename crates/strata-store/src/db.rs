@@ -481,6 +481,19 @@ impl Db {
         Ok(schema)
     }
 
+    /// Drop a repo's loaded tables and every cached result, before its files are deleted.
+    pub fn unload(&self, repo: &str) -> anyhow::Result<()> {
+        let mut loaded = self.loaded.lock().unwrap();
+        if let Some((schema, _)) = loaded.remove(repo) {
+            self.base
+                .lock()
+                .unwrap()
+                .execute_batch(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"))?;
+        }
+        *self.cache.lock().unwrap() = QueryCache::default();
+        Ok(())
+    }
+
     /// Per-step axis times (seconds, monotonic) and flags, for client-side axis mapping.
     pub fn axis(&self, repo: &str) -> anyhow::Result<Vec<u8>> {
         self.with(repo, |c, s| {

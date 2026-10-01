@@ -93,6 +93,33 @@ pub fn auth_required(e: &anyhow::Error) -> Option<&AuthRequired> {
     e.chain().find_map(|c| c.downcast_ref::<AuthRequired>())
 }
 
+/// An extraction of the repo is running (here or in another strata process).
+#[derive(Debug)]
+pub struct Busy {
+    pub name: String,
+}
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "another extraction of {} is already running", self.name)
+    }
+}
+
+impl std::error::Error for Busy {}
+
+/// Take the repo's extraction lock (held until the file is dropped), or fail with `Busy`.
+fn lock_repo(dir: &Path, name: &str) -> anyhow::Result<std::fs::File> {
+    let lock = std::fs::File::create(dir.join("extract.lock"))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Busy {
+            name: name.to_string(),
+        }
+        .into()),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
 /// `scheme://host[:port]` of a remote URL, without any user info.
 fn remote_host(url: &str) -> String {
     let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
@@ -339,14 +366,7 @@ pub fn extract_source(
     let dir = layout.repo_dir(&id);
     std::fs::create_dir_all(&dir)?;
     // One extraction per repo at a time (CLI and server can both start one).
-    let lock = std::fs::File::create(dir.join("extract.lock"))?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => {
-            bail!("another extraction of {} is already running", source.name())
-        }
-        Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
-    }
+    let _lock = lock_repo(&dir, &source.name())?;
     let git_dir = prepare_git_dir(layout, source, fetch, login, cancel, progress)?;
     let repo_cfg = git_dir.join(".strata.toml");
     let cache_cfg = dir.join("strata.toml");
@@ -380,6 +400,45 @@ pub fn extract_source(
     };
     layout.write_meta(&meta)?;
     Ok(meta)
+}
+
+/// Delete a cached repo: its tables, checkpoint and `meta.json`, and for a remote its clone unless
+/// another cached repo reads the same one. A local source's own repository is never touched.
+/// Fails with `Busy` while an extraction of it runs. Returns the directories removed.
+pub fn remove_repo(layout: &Layout, id: &str) -> anyhow::Result<Vec<PathBuf>> {
+    // The id comes from a URL: only a plain cache directory name may reach `repo_dir`.
+    let safe = !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let meta = layout
+        .read_meta(id)
+        .ok()
+        .filter(|m| safe && m.id == id)
+        .with_context(|| format!("repo '{id}' not found"))?;
+    let dir = layout.repo_dir(id);
+    let _lock = lock_repo(&dir, &meta.name)?;
+    std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+    let mut removed = vec![dir];
+    if let Source::Url { url } = &meta.source {
+        // `clone_dir` drops the scheme and user, so two cached URLs can share one clone.
+        let clone = layout.clone_dir(url);
+        anyhow::ensure!(
+            clone.starts_with(layout.root.join("clones")),
+            "{} is outside the cache",
+            clone.display()
+        );
+        let shared = layout
+            .list()
+            .iter()
+            .any(|m| matches!(&m.source, Source::Url { url } if layout.clone_dir(url) == clone));
+        if !shared && clone.exists() {
+            std::fs::remove_dir_all(&clone)
+                .with_context(|| format!("removing {}", clone.display()))?;
+            removed.push(clone);
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]

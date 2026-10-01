@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use strata_engine::ExtractOptions;
 use strata_engine::diff::DiffOptions;
@@ -274,19 +273,18 @@ fn cmd_gc(layout: &Layout, days: u64, dry_run: bool) -> anyhow::Result<()> {
         if m.updated_at >= cutoff {
             continue;
         }
-        let mut dirs = vec![layout.repo_dir(&m.id)];
-        if let Source::Url { url } = &m.source {
-            dirs.push(layout.clone_dir(url));
-        }
-        for d in dirs {
-            println!(
-                "{} {}",
-                if dry_run { "would remove" } else { "removing" },
-                d.display()
-            );
-            if !dry_run {
-                std::fs::remove_dir_all(&d).with_context(|| format!("removing {}", d.display()))?;
+        if dry_run {
+            println!("would remove {}", layout.repo_dir(&m.id).display());
+            if let Source::Url { url } = &m.source {
+                println!(
+                    "would remove {} unless shared",
+                    layout.clone_dir(url).display()
+                );
             }
+            continue;
+        }
+        for d in strata_store::pipeline::remove_repo(layout, &m.id)? {
+            println!("removed {}", d.display());
         }
     }
     Ok(())

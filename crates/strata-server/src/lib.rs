@@ -14,14 +14,14 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::Stream;
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use strata_engine::ExtractOptions;
-use strata_store::pipeline::Credentials;
+use strata_store::pipeline::{Busy, Credentials, remove_repo};
 use strata_store::{
     AreaMode, AreaQuery, Axis, Bins, CompositionQuery, Db, Filters, Layout, Slice, Source,
 };
@@ -56,7 +56,9 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let msg = format!("{:#}", self.0);
-        let status = if msg.contains("not been extracted") || msg.contains("not found") {
+        let status = if self.0.chain().any(|c| c.is::<Busy>()) {
+            StatusCode::CONFLICT
+        } else if msg.contains("not been extracted") || msg.contains("not found") {
             StatusCode::NOT_FOUND
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
@@ -130,9 +132,86 @@ fn bins(q: &HashMap<String, String>) -> ApiResult<Bins> {
     })
 }
 
-async fn list_repos(State(st): State<Shared>) -> Json<Value> {
-    let repos = st.layout.list();
-    Json(json!({ "repos": repos, "jobs": st.jobs.all() }))
+async fn list_repos(State(st): State<Shared>) -> ApiResult<Json<Value>> {
+    let layout = st.layout.clone();
+    let repos = blocking(move || {
+        Ok(layout
+            .list()
+            .into_iter()
+            .map(|m| {
+                // What deleting it frees: the cached tables, plus the clone of a remote.
+                let mut bytes = dir_bytes(&layout.repo_dir(&m.id));
+                if let Source::Url { url } = &m.source {
+                    bytes += dir_bytes(&layout.clone_dir(url));
+                }
+                let mut v = serde_json::to_value(&m).unwrap_or_default();
+                v["disk_bytes"] = json!(bytes);
+                v
+            })
+            .collect::<Vec<_>>())
+    })
+    .await?;
+    Ok(Json(json!({ "repos": repos, "jobs": st.jobs.all() })))
+}
+
+/// Total size of the files under `dir` (0 if it is missing).
+fn dir_bytes(dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_bytes(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map_or(0, |m| m.len()),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Fetch (for a remote) and extract a cached repo again, incrementally, on the branch it was
+/// extracted from: following a work tree's HEAD onto another branch would discard the cache.
+async fn update_repo(State(st): State<Shared>, Path(repo): Path<String>) -> ApiResult<Json<Value>> {
+    let meta = st
+        .layout
+        .list()
+        .into_iter()
+        .find(|m| m.id == repo)
+        .ok_or_else(|| anyhow::anyhow!("repo '{repo}' not found"))?;
+    let mut opts = st.extract_opts.clone();
+    if meta.branch != "HEAD" {
+        opts.branch = Some(meta.branch);
+    }
+    let job = st
+        .jobs
+        .start(st.layout.clone(), meta.source, opts, true, None, |_| {});
+    let status = job.status.lock().unwrap().clone();
+    Ok(Json(serde_json::to_value(status)?))
+}
+
+/// Delete a cached repo's data (and a remote's clone); a local repository is never touched.
+async fn delete_repo(State(st): State<Shared>, Path(repo): Path<String>) -> ApiResult<Json<Value>> {
+    let meta = st
+        .layout
+        .list()
+        .into_iter()
+        .find(|m| m.id == repo)
+        .ok_or_else(|| anyhow::anyhow!("repo '{repo}' not found"))?;
+    if st.jobs.running_for(&repo).is_some() {
+        return Err(Busy { name: meta.name }.into());
+    }
+    let s = st.clone();
+    let removed = blocking(move || {
+        s.db.unload(&repo)?;
+        remove_repo(&s.layout, &repo)
+    })
+    .await?;
+    if let Source::Url { url } = &meta.source {
+        st.jobs.forget_login(url);
+    }
+    for d in &removed {
+        tracing::info!("removed {}", d.display());
+    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]
@@ -506,6 +585,8 @@ pub fn router(state: Shared) -> Router {
         .route("/jobs/{id}", get(job_status))
         .route("/jobs/{id}/events", get(job_events))
         .route("/jobs/{id}/cancel", post(cancel_job))
+        .route("/r/{repo}", delete(delete_repo))
+        .route("/r/{repo}/update", post(update_repo))
         .route("/r/{repo}/meta", get(repo_meta))
         .route("/r/{repo}/axis", get(repo_axis))
         .route("/r/{repo}/paths", get(repo_paths))
