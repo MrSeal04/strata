@@ -80,6 +80,13 @@ impl Jobs {
             .any(|j| matches!(j.status.lock().unwrap().state, JobState::Running))
     }
 
+    /// Ask every running extraction to checkpoint and stop.
+    pub fn cancel_all(&self) {
+        for j in self.jobs.lock().unwrap().values() {
+            j.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
     /// Forget the login remembered for a remote (its repo was deleted).
     pub fn forget_login(&self, url: &str) {
         self.logins.lock().unwrap().remove(url);

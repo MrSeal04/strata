@@ -26,8 +26,7 @@ use strata_store::pipeline::{Busy, Credentials, remove_repo};
 use strata_store::{
     AreaMode, AreaQuery, Axis, Bins, CompositionQuery, Db, Filters, Layout, Slice, Source,
 };
-use tokio_stream::StreamExt;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio::sync::broadcast::error::RecvError;
 
 use crate::jobs::{JobState, Jobs};
 
@@ -303,18 +302,29 @@ async fn job_events(
         .ok_or_else(|| anyhow::anyhow!("job {id} not found"))?;
     let rx = job.tx.subscribe();
     let first = job.status.lock().unwrap().clone();
-    let finished = !matches!(first.state, JobState::Running);
-    let head = tokio_stream::once(first);
-    let rest = BroadcastStream::new(rx).filter_map(Result::ok);
-    let stream = head
-        .chain(rest)
-        .map(|s| Ok(Event::default().json_data(&s).unwrap_or_default()));
-    let stream: std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> =
-        if finished {
-            Box::pin(stream.take(1))
-        } else {
-            Box::pin(stream)
-        };
+    // The current status, then each update, ending right after the job's final one: the stream
+    // ends with the job, so it can't hold a shutting-down server open.
+    let stream = futures_util::stream::unfold(
+        (Some(first), rx, false),
+        |(pending, mut rx, ended)| async move {
+            if ended {
+                return None;
+            }
+            let s = match pending {
+                Some(s) => s,
+                None => loop {
+                    match rx.recv().await {
+                        Ok(s) => break s,
+                        Err(RecvError::Lagged(_)) => continue,
+                        Err(RecvError::Closed) => return None,
+                    }
+                },
+            };
+            let ended = !matches!(s.state, JobState::Running);
+            let event = Ok(Event::default().json_data(&s).unwrap_or_default());
+            Some((event, (None, rx, ended)))
+        },
+    );
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
@@ -677,6 +687,10 @@ pub async fn bind(
     SocketAddr,
     impl Future<Output = std::io::Result<()>> + use<>,
 )> {
+    use tokio::signal::unix::{SignalKind, signal};
+    // Closing the terminal (SIGHUP) and SIGTERM stop the server as Ctrl-C does.
+    let mut hangup = signal(SignalKind::hangup())?;
+    let mut terminate = signal(SignalKind::terminate())?;
     let mut last_err = None;
     for port in cfg.port..cfg.port.saturating_add(20) {
         match tokio::net::TcpListener::bind((cfg.host.as_str(), port)).await {
@@ -686,8 +700,12 @@ pub async fn bind(
                 let fut = axum::serve(listener, app).with_graceful_shutdown(async move {
                     tokio::select! {
                         _ = tokio::signal::ctrl_c() => {}
+                        _ = hangup.recv() => {}
+                        _ = terminate.recv() => {}
                         _ = state.shutdown.notified() => {}
                     }
+                    // Running extractions checkpoint and stop, and their git processes go too.
+                    state.jobs.cancel_all();
                 });
                 return Ok((addr, fut.into_future()));
             }

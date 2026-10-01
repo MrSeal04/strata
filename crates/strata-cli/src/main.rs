@@ -5,6 +5,7 @@ mod login;
 mod progress;
 mod render;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -49,11 +50,14 @@ enum Cmd {
     /// Serve every cached repo (the UI has a repo picker and an "add URL" box).
     Serve(ServeArgs),
     /// Open the dashboard from the app launcher: in the strata server already running, or in a
-    /// new one that stops once no dashboard has been open for a while.
+    /// new one that runs until its terminal window is closed.
     App {
         #[arg(long, default_value_t = 7420)]
         port: u16,
-        /// Seconds without an open dashboard before the server stops
+        /// Stop 10 minutes after the last dashboard tab closes instead (for a launcher without
+        /// a terminal)
+        #[arg(long)]
+        exit_when_idle: bool,
         #[arg(long, default_value_t = 600, hide = true)]
         idle_secs: u64,
     },
@@ -167,8 +171,19 @@ fn main() -> anyhow::Result<()> {
     let layout = Layout::new(cli.home.clone().unwrap_or_else(Layout::default_root));
     match cli.cmd {
         Some(Cmd::Extract { source, args }) => cmd_extract(&layout, &source, &args),
-        Some(Cmd::Serve(s)) => serve(layout, None, &cli.extract, &s, None),
-        Some(Cmd::App { port, idle_secs }) => cmd_app(layout, &cli.extract, port, idle_secs),
+        Some(Cmd::Serve(s)) => serve(layout, None, &cli.extract, &s, Stop::CtrlC),
+        Some(Cmd::App {
+            port,
+            exit_when_idle,
+            idle_secs,
+        }) => {
+            let stop = if exit_when_idle {
+                Stop::Idle(Duration::from_secs(idle_secs))
+            } else {
+                Stop::Window
+            };
+            cmd_app(layout, &cli.extract, port, stop)
+        }
         Some(Cmd::List) => cmd_list(&layout),
         Some(Cmd::Gc {
             older_than,
@@ -181,7 +196,7 @@ fn main() -> anyhow::Result<()> {
             cli.source.as_deref(),
             &cli.extract,
             &cli.serve,
-            None,
+            Stop::CtrlC,
         ),
     }
 }
@@ -306,10 +321,21 @@ fn cmd_gc(layout: &Layout, days: u64, dry_run: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The launcher's entry: reuse a strata server on `port`, else serve until no page is open.
-fn cmd_app(layout: Layout, extract: &ExtractArgs, port: u16, idle_secs: u64) -> anyhow::Result<()> {
+/// How a server started by `serve` is meant to stop (any of them also stops on Ctrl-C, SIGTERM
+/// and a closed terminal).
+enum Stop {
+    CtrlC,
+    /// Started by the app launcher in a terminal window: closing it stops strata.
+    Window,
+    /// Once no page has called the API for this long and no extraction is running.
+    Idle(Duration),
+}
+
+/// The launcher's entry: reuse a strata server on `port`, else serve until `stop`.
+fn cmd_app(layout: Layout, extract: &ExtractArgs, port: u16, stop: Stop) -> anyhow::Result<()> {
     if let Some(url) = running_server(port) {
-        eprintln!("strata is already serving on {url}");
+        // This window closes at once; the one running that server is the one to close.
+        eprintln!("strata is already running at {url}");
         return Ok(open::that_detached(&url)?);
     }
     let s = ServeArgs {
@@ -317,13 +343,7 @@ fn cmd_app(layout: Layout, extract: &ExtractArgs, port: u16, idle_secs: u64) -> 
         host: "127.0.0.1".into(),
         no_open: false,
     };
-    serve(
-        layout,
-        None,
-        extract,
-        &s,
-        Some(Duration::from_secs(idle_secs)),
-    )
+    serve(layout, None, extract, &s, stop)
 }
 
 /// The address of a strata server answering on `port` on this machine, if there is one.
@@ -341,13 +361,13 @@ fn running_server(port: u16) -> Option<String> {
         .then(|| format!("http://127.0.0.1:{port}/"))
 }
 
-/// Serve the dashboard; with `idle`, stop once no page has been open that long.
+/// Serve the dashboard until `stop`.
 fn serve(
     layout: Layout,
     source: Option<&str>,
     extract: &ExtractArgs,
     s: &ServeArgs,
-    idle: Option<Duration>,
+    stop: Stop,
 ) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
@@ -402,15 +422,23 @@ fn serve(
                 }
             });
         }
-        match idle {
-            Some(d) => {
+        match stop {
+            Stop::CtrlC => eprintln!("strata serving on {url}  (Ctrl-C to stop)"),
+            Stop::Window => {
+                if std::io::stderr().is_terminal() {
+                    eprint!("\x1b]0;strata\x07"); // the window's title
+                }
+                eprintln!(
+                    "strata is running at {url}\n\nClose this window or press Ctrl-C to stop it."
+                );
+            }
+            Stop::Idle(d) => {
                 strata_server::exit_when_idle(state.clone(), d);
                 eprintln!(
                     "strata serving on {url}  (stops {} min after the last dashboard closes)",
                     d.as_secs().div_ceil(60)
                 );
             }
-            None => eprintln!("strata serving on {url}  (Ctrl-C to stop)"),
         }
         if !s.no_open {
             let u = url.clone();
@@ -422,6 +450,12 @@ fn serve(
             });
         }
         server.await?;
+        // Give extractions the shutdown stopped time to checkpoint and kill their git. Nothing
+        // prints from here: after a closed terminal, writing to stderr fails.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while state.jobs.any_running() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         anyhow::Ok(())
     })
 }
