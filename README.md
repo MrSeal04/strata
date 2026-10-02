@@ -93,8 +93,6 @@ turns on verbose logs.
   emits SVG. Colors follow a colorblind-validated palette. Additions and deletions are blue and
   red by default; classic green/red is available in the settings.
 
-See [PLAN.md](PLAN.md) for the full design.
-
 ## Per-repo configuration
 
 Put `.strata.toml` in the repo (or `strata.toml` in its cache directory):
