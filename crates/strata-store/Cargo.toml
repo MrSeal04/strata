@@ -13,7 +13,6 @@ bundled = ["duckdb/bundled"]
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tracing.workspace = true
 strata-engine = { path = "../strata-engine" }
 duckdb = "1.10505"
 arrow = { version = "58", default-features = false, features = ["ipc"] }

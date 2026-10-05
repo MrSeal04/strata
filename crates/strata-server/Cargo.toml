@@ -14,7 +14,6 @@ strata-engine = { path = "../strata-engine" }
 strata-store = { path = "../strata-store" }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "net", "process", "io-util", "time"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = "0.3"
 rust-embed = { version = "8", features = ["mime-guess"] }
 tower-http = { version = "0.7", features = ["compression-gzip", "cors"] }

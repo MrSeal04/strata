@@ -8,7 +8,6 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 tracing.workspace = true
 gix = { version = "0.88", default-features = false, features = ["max-performance-safe", "basic", "mailmap", "sha1", "parallel", "anyhow"] }
 crossbeam-channel = "0.5"

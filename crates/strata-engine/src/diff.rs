@@ -227,10 +227,6 @@ impl DiffWorker {
         })
     }
 
-    pub fn repo(&self) -> &gix::Repository {
-        &self.repo
-    }
-
     fn blob(&self, id: ObjectId) -> anyhow::Result<Vec<u8>> {
         Ok(self
             .repo

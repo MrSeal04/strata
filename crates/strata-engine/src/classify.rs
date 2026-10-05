@@ -35,14 +35,6 @@ pub fn lang_name(idx: Option<u16>) -> &'static str {
     idx.map_or("Other", |i| LANGS[i as usize].0)
 }
 
-pub fn lang_color(name: &str) -> Option<&'static str> {
-    LANGS
-        .iter()
-        .find(|(n, _, _)| *n == name)
-        .map(|(_, c, _)| *c)
-        .filter(|c| !c.is_empty())
-}
-
 const LOCKFILES: &[&str] = &[
     "package-lock.json",
     "npm-shrinkwrap.json",
@@ -285,7 +277,7 @@ impl Classifier {
         if name == "Jupyter Notebook" {
             return (category::NOTEBOOK, lang);
         }
-        let ty = lang.map(|i| LANGS[i as usize].2);
+        let ty = lang.map(|i| LANGS[i as usize].1);
         if ty == Some(3) || (ty == Some(1) && self.docs_dir.is_match(path)) {
             return (category::DOCS, lang);
         }
