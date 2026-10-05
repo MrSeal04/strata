@@ -435,17 +435,135 @@ pub fn remove_repo(layout: &Layout, id: &str) -> anyhow::Result<Vec<PathBuf>> {
         if !shared && clone.exists() {
             std::fs::remove_dir_all(&clone)
                 .with_context(|| format!("removing {}", clone.display()))?;
-            // And the host and owner directories it leaves empty.
-            let root = layout.root.join("clones");
-            let mut parent = clone.parent();
-            while let Some(p) = parent.filter(|p| *p != root && p.starts_with(&root)) {
-                if std::fs::remove_dir(p).is_err() {
-                    break;
-                }
-                parent = p.parent();
-            }
+            remove_empty_parents(layout, &clone);
             removed.push(clone);
         }
+    }
+    Ok(removed)
+}
+
+/// Remove the host and owner directories a removed clone leaves empty.
+fn remove_empty_parents(layout: &Layout, clone: &Path) {
+    let root = layout.root.join("clones");
+    let mut parent = clone.parent();
+    while let Some(p) = parent.filter(|p| *p != root && p.starts_with(&root)) {
+        if std::fs::remove_dir(p).is_err() {
+            break;
+        }
+        parent = p.parent();
+    }
+}
+
+/// The newest modification time of `path` and everything below it.
+fn newest_mtime(path: &Path) -> std::time::SystemTime {
+    let mut newest = std::fs::symlink_metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::UNIX_EPOCH);
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for e in entries.flatten() {
+            let t = match e.file_type() {
+                Ok(ft) if ft.is_dir() => newest_mtime(&e.path()),
+                _ => e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH),
+            };
+            newest = newest.max(t);
+        }
+    }
+    newest
+}
+
+/// Clone directories under `dir`: bare mirrors (`*.git`) and leftovers of interrupted clones
+/// (`*.partial`).
+fn clone_dirs(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        if !e.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let path = e.path();
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with(".git") || name.ends_with(".partial") {
+            out.push(path);
+        } else {
+            clone_dirs(&path, out);
+        }
+    }
+}
+
+/// Remove what `remove_repo` never sees, once nothing in it is newer than `cutoff`: cache
+/// directories without a readable `meta.json` (a first extraction that failed or was
+/// interrupted; one still running holds its lock and is kept), and clones no cached repo reads
+/// (theirs, or an interrupted clone's `*.partial`). While any such directory is locked, its
+/// extraction may be cloning, so no clone is removed. With `dry_run`, only lists them.
+pub fn remove_orphans(
+    layout: &Layout,
+    cutoff: std::time::SystemTime,
+    dry_run: bool,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    let mut busy = false;
+    let entries = match std::fs::read_dir(layout.repos_dir()) {
+        Ok(rd) => rd.flatten().collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+    for e in entries {
+        let id = e.file_name().to_string_lossy().into_owned();
+        if !e.file_type().is_ok_and(|t| t.is_dir()) || layout.read_meta(&id).is_ok() {
+            continue;
+        }
+        let dir = layout.repo_dir(&id);
+        // (age first: nothing here may touch the directory before it's measured)
+        let old = newest_mtime(&dir) <= cutoff;
+        // An extraction creates its lock first thing, so without the file none is running.
+        let lock = match std::fs::File::open(dir.join("extract.lock")) {
+            Ok(f) => match f.try_lock() {
+                Ok(()) => Some(f),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    busy = true;
+                    continue;
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        if !old {
+            continue;
+        }
+        if !dry_run {
+            drop(lock);
+            std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+        }
+        removed.push(dir);
+    }
+    if busy {
+        return Ok(removed);
+    }
+    let read: Vec<PathBuf> = layout
+        .list()
+        .iter()
+        .filter_map(|m| match &m.source {
+            Source::Url { url } => Some(layout.clone_dir(url)),
+            Source::Path { .. } => None,
+        })
+        .collect();
+    let mut clones = Vec::new();
+    clone_dirs(&layout.root.join("clones"), &mut clones);
+    for clone in clones {
+        if read.contains(&clone) || newest_mtime(&clone) > cutoff {
+            continue;
+        }
+        if !dry_run {
+            std::fs::remove_dir_all(&clone)
+                .with_context(|| format!("removing {}", clone.display()))?;
+            remove_empty_parents(layout, &clone);
+        }
+        removed.push(clone);
     }
     Ok(removed)
 }

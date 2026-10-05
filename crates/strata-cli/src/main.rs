@@ -318,6 +318,13 @@ fn cmd_gc(layout: &Layout, days: u64, dry_run: bool) -> anyhow::Result<()> {
             println!("removed {}", d.display());
         }
     }
+    // Leftovers no repo lists: interrupted first extractions and clones nothing reads.
+    let cutoff =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(days.saturating_mul(86_400));
+    for d in strata_store::pipeline::remove_orphans(layout, cutoff, dry_run)? {
+        let verb = if dry_run { "would remove" } else { "removed" };
+        println!("{verb} {} (no cached repo uses it)", d.display());
+    }
     Ok(())
 }
 

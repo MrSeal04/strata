@@ -1,13 +1,16 @@
 //! Deleting a cached repo removes only what strata created: its cache directory, and a remote's
 //! clone unless another cached repo shares it. It never touches a local repository, refuses while
-//! an extraction holds the lock, and accepts only real cache ids.
+//! an extraction holds the lock, and accepts only real cache ids. `strata gc` also removes what no
+//! cached repo lists: interrupted first extractions and clones nothing reads.
 
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
+use std::time::{Duration, SystemTime};
 use strata_engine::ExtractOptions;
-use strata_store::pipeline::{Busy, extract_source, remove_repo};
+
+use strata_store::pipeline::{Busy, extract_source, remove_orphans, remove_repo};
 use strata_store::{Layout, RepoMeta, Source};
 
 fn git(dir: &Path, args: &[&str]) {
@@ -163,5 +166,94 @@ fn only_real_cache_ids_are_accepted() {
     }
     assert!(layout.repo_dir(&meta.id).join("meta.json").exists());
     assert!(tmp.path().join("home/meta.json").exists());
+    assert!(src.join(".git/HEAD").exists());
+}
+
+/// Set the modification time of `path` and everything below it to `secs` ago.
+fn age(path: &Path, secs: u64) {
+    let when = SystemTime::now() - Duration::from_secs(secs);
+    if path.is_dir() {
+        for e in std::fs::read_dir(path).unwrap().flatten() {
+            age(&e.path(), secs);
+        }
+    }
+    std::fs::File::open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+#[test]
+fn gc_removes_interrupted_extractions_and_unused_clones() {
+    const DAY: u64 = 86_400;
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    work_tree(&src);
+    let layout = Layout::new(tmp.path().join("home"));
+    // A cached remote, listed, with its clone.
+    let url = format!("file://{}", src.display());
+    let meta = extract(&layout, &url);
+    let used_clone = layout.clone_dir(&url);
+    // An interrupted first extraction (no meta.json), a clone nothing reads and a clone that
+    // never finished, all untouched for two days.
+    let orphan = layout.repo_dir("other-0123abcd");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join("checkpoint.bin"), b"x").unwrap();
+    let unused_clone = layout.root.join("clones/git.example.com/you/other.git");
+    std::fs::create_dir_all(&unused_clone).unwrap();
+    std::fs::write(unused_clone.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+    let partial = layout.root.join("clones/git.example.com/you/third.partial");
+    std::fs::create_dir_all(&partial).unwrap();
+    let mut all = vec![orphan.clone(), unused_clone.clone(), partial.clone()];
+    all.sort();
+    for p in &all {
+        age(p, 2 * DAY);
+    }
+    let sorted = |mut v: Vec<std::path::PathBuf>| {
+        v.sort();
+        v
+    };
+    let a_day_ago = SystemTime::now() - Duration::from_secs(DAY);
+    let three_days_ago = SystemTime::now() - Duration::from_secs(3 * DAY);
+
+    assert!(
+        remove_orphans(&layout, three_days_ago, false)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        sorted(remove_orphans(&layout, a_day_ago, true).unwrap()),
+        all
+    );
+    assert!(all.iter().all(|p| p.exists()), "a dry run removes nothing");
+    // (and it touched nothing: they're still old)
+    assert_eq!(
+        sorted(remove_orphans(&layout, a_day_ago, true).unwrap()),
+        all
+    );
+
+    // A first extraction still running keeps its directory, and every clone (it may be cloning).
+    let lock = std::fs::File::create(orphan.join("extract.lock")).unwrap();
+    lock.try_lock().unwrap();
+    age(&orphan, 2 * DAY);
+    assert!(
+        remove_orphans(&layout, a_day_ago, false)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(all.iter().all(|p| p.exists()));
+    drop(lock);
+
+    assert_eq!(
+        sorted(remove_orphans(&layout, a_day_ago, false).unwrap()),
+        all
+    );
+    assert!(all.iter().all(|p| !p.exists()));
+    assert!(
+        !layout.root.join("clones/git.example.com").exists(),
+        "empty parents go too"
+    );
+    assert!(layout.repo_dir(&meta.id).join("meta.json").exists());
+    assert!(used_clone.join("HEAD").exists());
     assert!(src.join(".git/HEAD").exists());
 }
