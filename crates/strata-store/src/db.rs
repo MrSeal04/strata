@@ -27,8 +27,13 @@ pub struct Db {
     cache: Mutex<QueryCache>,
     /// Serializes lazy aggregate creation.
     agg_lock: Mutex<()>,
-    /// Lazily built tables known to exist (`schema.table`), so requests skip the build check.
+    /// Lazily built tables known to exist (`<load_gen>|schema.table`), so requests skip the
+    /// build check.
     built: Mutex<HashSet<String>>,
+    /// Bumped after every schema (re)load or unload. A marker records the generation read before
+    /// its table was built: one built in a schema a concurrent reload then dropped carries an old
+    /// generation, so it's never trusted (the table is checked and rebuilt instead).
+    load_gen: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default)]
@@ -345,6 +350,7 @@ impl Db {
             cache: Mutex::new(QueryCache::default()),
             agg_lock: Mutex::new(()),
             built: Mutex::new(HashSet::new()),
+            load_gen: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -374,13 +380,18 @@ impl Db {
         Ok(v)
     }
 
-    /// Forget the lazily built tables of `schema` (its tables are being dropped).
+    /// The `built` marker for `schema.table` in the current load generation.
+    fn built_key(&self, schema: &str, table: &str) -> String {
+        let generation = self.load_gen.load(std::sync::atomic::Ordering::SeqCst);
+        format!("{generation}|{schema}.{table}")
+    }
+
+    /// `schema` was just dropped or replaced: start a new generation and drop its markers.
     fn forget_built(&self, schema: &str) {
-        let prefix = format!("{schema}.");
-        self.built
-            .lock()
-            .unwrap()
-            .retain(|t| !t.starts_with(&prefix));
+        self.load_gen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let part = format!("|{schema}.");
+        self.built.lock().unwrap().retain(|t| !t.contains(&part));
     }
 
     fn give_back(&self, c: Connection) {
@@ -485,9 +496,11 @@ impl Db {
              CREATE TABLE {schema}.canon AS SELECT a.author_id, a.canonical_id, c.name, c.email, a.is_bot
                FROM {schema}.authors a JOIN {schema}.authors c ON c.author_id = a.canonical_id;"
         );
+        let loaded_now = conn
+            .execute_batch(&sql)
+            .with_context(|| format!("loading repo {repo}"));
         self.forget_built(&schema);
-        conn.execute_batch(&sql)
-            .with_context(|| format!("loading repo {repo}"))?;
+        loaded_now?;
         *self.cache.lock().unwrap() = QueryCache::default();
         loaded.insert(repo.to_string(), (schema.clone(), fp));
         Ok(schema)
@@ -497,11 +510,13 @@ impl Db {
     pub fn unload(&self, repo: &str) -> anyhow::Result<()> {
         let mut loaded = self.loaded.lock().unwrap();
         if let Some((schema, _)) = loaded.remove(repo) {
-            self.forget_built(&schema);
-            self.base
+            let dropped = self
+                .base
                 .lock()
                 .unwrap()
-                .execute_batch(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"))?;
+                .execute_batch(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"));
+            self.forget_built(&schema);
+            dropped?;
         }
         *self.cache.lock().unwrap() = QueryCache::default();
         Ok(())
@@ -849,7 +864,7 @@ impl Db {
                 ),
             ),
         };
-        let key = format!("{s}.{table}");
+        let key = self.built_key(s, &table);
         if self.built.lock().unwrap().contains(&key) {
             return Ok(table);
         }
@@ -873,7 +888,7 @@ impl Db {
     /// came from (through chains of moves). Every other change row is an edit at its own step.
     fn ensure_rename_edits(&self, c: &Connection, s: &str) -> anyhow::Result<()> {
         use arrow::array::{Array, BooleanArray, UInt8Array, UInt32Array};
-        let key = format!("{s}.rename_edits");
+        let key = self.built_key(s, "rename_edits");
         if self.built.lock().unwrap().contains(&key) {
             return Ok(());
         }
