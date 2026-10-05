@@ -193,6 +193,29 @@ impl Filters {
         p.join(" AND ")
     }
 
+    /// Whether a language or folder filter limits which paths count (`git log -- <paths>`).
+    fn scoped(&self) -> bool {
+        !self.langs.is_empty() || !self.root.trim_matches('/').is_empty()
+    }
+
+    /// Predicate over `steps s`: the commit touched a path in scope. Only the language and folder
+    /// filters scope commits; hidden kinds of files only change the counts, or a commit that
+    /// just bumps a lockfile would vanish from the history by default.
+    fn touches_scope(&self, schema: &str) -> String {
+        if !self.scoped() {
+            return "TRUE".into();
+        }
+        let scope = Filters {
+            exclude: Vec::new(),
+            ..self.clone()
+        };
+        format!(
+            "EXISTS (SELECT 1 FROM {schema}.changes c JOIN {schema}.paths p USING (path_id)
+                     WHERE c.step = s.step AND {})",
+            scope.path_pred()
+        )
+    }
+
     /// Predicate over `steps s` (commit authorship).
     fn step_pred(&self, schema: &str) -> String {
         let mut p = vec!["TRUE".to_string()];
@@ -1122,6 +1145,63 @@ impl Db {
                  ORDER BY coalesce(ch.a, 0) + coalesce(ch.d, 0) DESC, s.step LIMIT {limit}",
                 a = f.adds(), d = f.dels(), pp = f.path_pred(), sp = f.step_pred(s),
             ))
+        })
+    }
+
+    /// The branch history's commits under the filters, oldest first: the authors and bots filters
+    /// pick commits, and a language or folder filter keeps those touching it (`git log -- dir`).
+    pub fn history(&self, repo: &str, f: &Filters) -> anyhow::Result<Bytes> {
+        self.with(repo, |c, s| {
+            self.ipc_cached(c, &format!(
+                "SELECT s.step::INTEGER AS step FROM {s}.steps s WHERE {sp} AND {tp} ORDER BY s.step",
+                sp = f.step_pred(s), tp = f.touches_scope(s),
+            ))
+        })
+    }
+
+    /// History rows for these steps, newest first, counting lines under the filters.
+    pub fn history_rows(
+        &self,
+        repo: &str,
+        steps: &[u32],
+        f: &Filters,
+    ) -> anyhow::Result<Vec<Value>> {
+        let (Some(lo), Some(hi)) = (steps.iter().min(), steps.iter().max()) else {
+            return Ok(Vec::new());
+        };
+        // (the range lets DuckDB skip row groups; the list picks the rows)
+        let pick = |col: &str| format!("{col} BETWEEN {lo} AND {hi} AND {col} IN ({})", ids(steps));
+        self.with(repo, |c, s| {
+            json_rows(c, &format!(
+                "WITH ch AS (SELECT c.step, sum(c.{a})::BIGINT AS a, sum(c.{d})::BIGINT AS d
+                             FROM {s}.changes c JOIN {s}.paths p USING (path_id)
+                             WHERE {cp} AND {pp} GROUP BY c.step)
+                 SELECT s.step, s.sha, s.summary, k.name AS author, k.canonical_id AS author_id,
+                        s.author_time::DOUBLE AS author_time, s.axis_time::DOUBLE AS time,
+                        coalesce(ch.a, 0)::INTEGER AS adds, coalesce(ch.d, 0)::INTEGER AS dels,
+                        s.is_merge, s.side_count, s.flags
+                 FROM {s}.steps s LEFT JOIN ch USING (step) LEFT JOIN {s}.canon k ON k.author_id = s.author_id
+                 WHERE {sp} ORDER BY s.step DESC",
+                a = f.adds(), d = f.dels(), pp = f.path_pred(), cp = pick("c.step"), sp = pick("s.step"),
+            ))
+        })
+    }
+
+    /// The side-branch commits a merge brought in, newest first (by author date: the tables keep
+    /// no parents), with how many there are in all.
+    pub fn side_commits(&self, repo: &str, step: u32, limit: u32) -> anyhow::Result<Value> {
+        self.with(repo, |c, s| {
+            let total = json_rows(c, &format!(
+                "SELECT count(*)::INTEGER AS n FROM {s}.side_commits WHERE landing_step = {step}"
+            ))?;
+            let commits = json_rows(c, &format!(
+                "SELECT sc.sha, sc.summary, k.name AS author, k.canonical_id AS author_id,
+                        sc.author_time::DOUBLE AS author_time
+                 FROM {s}.side_commits sc LEFT JOIN {s}.canon k ON k.author_id = sc.author_id
+                 WHERE sc.landing_step = {step} ORDER BY sc.author_time DESC, sc.sha LIMIT {limit}"
+            ))?;
+            let total = total.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
+            Ok(json!({ "total": total, "commits": commits }))
         })
     }
 

@@ -578,6 +578,44 @@ async fn repo_commits(
     )))
 }
 
+async fn repo_history(
+    State(st): State<Shared>,
+    Path(repo): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Response> {
+    let f = filters(&q);
+    Ok(arrow(blocking(move || st.db.history(&repo, &f)).await?))
+}
+
+/// Rows for at most 500 steps of the history (`steps=3,2,1`).
+async fn repo_history_rows(
+    State(st): State<Shared>,
+    Path(repo): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let f = filters(&q);
+    let mut steps = list_u32(q.get("steps"));
+    steps.truncate(500);
+    Ok(Json(json!(
+        blocking(move || st.db.history_rows(&repo, &steps, &f)).await?
+    )))
+}
+
+async fn repo_side(
+    State(st): State<Shared>,
+    Path((repo, n)): Path<(String, u32)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let limit = q
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200u32)
+        .min(2000);
+    Ok(Json(
+        blocking(move || st.db.side_commits(&repo, n, limit)).await?,
+    ))
+}
+
 async fn repo_search(
     State(st): State<Shared>,
     Path(repo): Path<String>,
@@ -669,6 +707,9 @@ pub fn router(state: Shared) -> Router {
         .route("/r/{repo}/renames", get(repo_renames))
         .route("/r/{repo}/step/{n}", get(repo_step))
         .route("/r/{repo}/commits", get(repo_commits))
+        .route("/r/{repo}/history", get(repo_history))
+        .route("/r/{repo}/history/rows", get(repo_history_rows))
+        .route("/r/{repo}/side/{n}", get(repo_side))
         .route("/r/{repo}/search", get(repo_search))
         .route("/r/{repo}/dirs", get(repo_dirs))
         .merge(render::routes())

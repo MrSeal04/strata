@@ -888,6 +888,137 @@ fn check_repo(name: &str) {
     }
     db.dirs(&id, "", &f).unwrap();
     db.authors(&id).unwrap();
+
+    // 10. History: every first-parent commit in order; a folder filter keeps exactly the commits
+    //     whose diff against the first parent touches it; each merge's side commits are what it
+    //     brought in (`git rev-list M ^M^1`, less M).
+    let shas = git(
+        &repo,
+        &["log", "--first-parent", "--reverse", "--format=%H"],
+    );
+    let shas: Vec<&str> = shas.lines().collect();
+    let history = |f: &Filters| -> Vec<u32> {
+        int_rows(&db.history(&id, f).unwrap(), &["step"])
+            .iter()
+            .map(|r| r[0] as u32)
+            .collect()
+    };
+    let all = Filters::default();
+    let steps = history(&all);
+    assert_eq!(
+        steps,
+        (0..shas.len() as u32).collect::<Vec<_>>(),
+        "{name}: history"
+    );
+    let numstat = git_numstat(&repo, false);
+    let mut rows = Vec::new();
+    // (in pages, as the dashboard asks)
+    for page in steps
+        .rchunks(4)
+        .map(|c| c.iter().rev().copied().collect::<Vec<_>>())
+    {
+        let got = db.history_rows(&id, &page, &all).unwrap();
+        let got_steps: Vec<u32> = got
+            .iter()
+            .map(|r| r["step"].as_u64().unwrap() as u32)
+            .collect();
+        assert_eq!(got_steps, page, "{name}: history rows come newest first");
+        rows.extend(got);
+    }
+    for r in &rows {
+        let step = r["step"].as_u64().unwrap() as usize;
+        let sha = r["sha"].as_str().unwrap();
+        assert_eq!(sha, shas[step], "{name}: history row {step}");
+        let parents = git(&repo, &["rev-list", "--parents", "-n1", sha]);
+        let parents: Vec<&str> = parents.split_whitespace().skip(1).collect();
+        assert_eq!(
+            r["is_merge"].as_bool().unwrap(),
+            parents.len() > 1,
+            "{name}: merge at {step}"
+        );
+        let (_, adds, dels) = &numstat[step];
+        let binary = db
+            .with(&id, |c, s| {
+                Ok(c.query_row(
+                    &format!("SELECT count(*) FROM {s}.changes WHERE step = {step} AND is_binary"),
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap();
+        if binary == 0 {
+            assert_eq!(
+                (r["adds"].as_u64().unwrap(), r["dels"].as_u64().unwrap()),
+                (*adds, *dels),
+                "{name}: history row {step} counts"
+            );
+        }
+        // Side commits.
+        let mut want: Vec<String> = if parents.len() > 1 {
+            git(&repo, &["rev-list", sha, &format!("^{}", parents[0])])
+                .lines()
+                .filter(|l| *l != sha)
+                .map(str::to_string)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        want.sort();
+        let side = db.side_commits(&id, step as u32, 2000).unwrap();
+        let mut got: Vec<String> = side["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["sha"].as_str().unwrap().to_string())
+            .collect();
+        got.sort();
+        assert_eq!(got, want, "{name}: side commits of step {step}");
+        assert_eq!(side["total"].as_u64().unwrap() as usize, want.len());
+        assert_eq!(r["side_count"].as_u64().unwrap() as usize, want.len());
+    }
+    // Folder filters, at every folder the history ever held.
+    let mut dirs: Vec<String> = git(
+        &repo,
+        &["log", "--first-parent", "--name-only", "--format="],
+    )
+    .lines()
+    .flat_map(|p| {
+        let parts: Vec<&str> = p.split('/').collect();
+        (1..parts.len()).map(move |n| parts[..n].join("/"))
+    })
+    .collect();
+    dirs.sort();
+    dirs.dedup();
+    assert!(!dirs.is_empty(), "{name}: no folders to filter by");
+    for dir in &dirs {
+        let want: Vec<u32> = shas
+            .iter()
+            .enumerate()
+            .filter(|(i, sha)| {
+                let parent = if *i == 0 {
+                    // (the empty tree)
+                    "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+                } else {
+                    format!("{sha}^1")
+                };
+                !Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(["diff", "--quiet", "--no-renames", &parent, sha, "--", dir])
+                    .status()
+                    .unwrap()
+                    .success()
+            })
+            .map(|(i, _)| i as u32)
+            .collect();
+        // Hidden kinds of files don't hide commits.
+        let f = Filters {
+            root: dir.clone(),
+            exclude: vec![4, 5, 6, 7],
+            ..Default::default()
+        };
+        assert_eq!(history(&f), want, "{name}: history under {dir}/");
+    }
 }
 
 fn state_sql_for_test(s: &str, step: u32) -> String {
