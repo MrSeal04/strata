@@ -240,7 +240,11 @@ pub fn run(layout: Layout, args: BenchArgs) -> anyhow::Result<()> {
         ),
         (
             "step",
-            Box::new(|| Ok(db.step(&id, last / 2)?.to_string().len())),
+            Box::new(|| Ok(db.step(&id, last / 2, false)?.to_string().len())),
+        ),
+        (
+            "step/brief",
+            Box::new(|| Ok(db.step(&id, last / 2, true)?.to_string().len())),
         ),
         (
             "commits",

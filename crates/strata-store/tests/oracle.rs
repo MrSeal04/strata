@@ -802,11 +802,90 @@ fn check_repo(name: &str) {
     db.state(&id, 3, &f).unwrap();
     db.events(&id, -1, 5, &f).unwrap();
     db.compare(&id, 1, 4, &f).unwrap();
-    db.step(&id, 2).unwrap();
+    // The brief step (transport bar) is the full one's commit, minus the message.
+    let full = db.step(&id, 2, false).unwrap();
+    let brief = db.step(&id, 2, true).unwrap();
+    for (k, v) in brief["commit"].as_object().unwrap() {
+        assert_eq!(&full["commit"][k], v, "{name}: brief step field {k}");
+    }
     db.commits(&id, 0, 5, &f, 10).unwrap();
-    db.search(&id, "merge", "message", 50).unwrap();
-    db.search(&id, "alice", "author", 50).unwrap();
-    db.search(&id, "src", "path", 50).unwrap();
+    // Search finds what a case-insensitive `ILIKE '%q%'` finds.
+    for (q, kind) in [
+        ("merge", "message"),
+        ("MERGE", "message"),
+        ("e", "message"),
+        ("it's", "message"),
+        ("100%", "message"),
+        ("alice", "author"),
+        ("ALICE@", "author"),
+        ("src", "path"),
+        ("SRC/", "path"),
+        ("_", "path"),
+    ] {
+        let got = db.search(&id, q, kind, 10_000).unwrap();
+        let ids = |v: &serde_json::Value| -> Vec<i64> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_i64().unwrap())
+                .collect()
+        };
+        let pat = format!(
+            "'%{}%'",
+            q.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+                .replace('\'', "''")
+        );
+        let like = |col: &str| format!("{col} ILIKE {pat} ESCAPE '\\'");
+        let (want_steps, want_paths): (Vec<i64>, Vec<i64>) = db
+            .with(&id, |c, s| {
+                let steps_sql = match kind {
+                    "author" => format!(
+                        "SELECT DISTINCT step FROM (
+                           SELECT st.step FROM {s}.steps st JOIN {s}.canon k ON k.author_id = st.author_id WHERE {n} OR {e}
+                           UNION ALL SELECT sc.landing_step FROM {s}.side_commits sc JOIN {s}.canon k ON k.author_id = sc.author_id
+                           WHERE {n} OR {e}) ORDER BY step",
+                        n = like("k.name"), e = like("k.email")
+                    ),
+                    "path" => format!(
+                        "SELECT DISTINCT c.step FROM {s}.changes c JOIN {s}.paths p USING (path_id) WHERE {} ORDER BY c.step",
+                        like("p.path")
+                    ),
+                    _ => format!(
+                        "SELECT DISTINCT step FROM (
+                           SELECT step FROM {s}.messages WHERE {m}
+                           UNION ALL SELECT landing_step FROM {s}.side_commits WHERE {u}
+                           UNION ALL SELECT step FROM {s}.steps WHERE sha LIKE '{pre}%') ORDER BY step",
+                        m = like("message"), u = like("summary"), pre = q.to_lowercase().replace('\'', "")
+                    ),
+                };
+                let col = |sql: &str| -> anyhow::Result<Vec<i64>> {
+                    let mut stmt = c.prepare(sql)?;
+                    let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+                    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+                };
+                let mut paths = if kind == "path" {
+                    col(&format!("SELECT path_id FROM {s}.paths WHERE {}", like("path")))?
+                } else {
+                    vec![]
+                };
+                paths.sort();
+                Ok((col(&steps_sql)?, paths))
+            })
+            .unwrap();
+        let mut got_paths = ids(&got["paths"]);
+        got_paths.sort();
+        assert_eq!(
+            ids(&got["steps"]),
+            want_steps,
+            "{name}: {kind} search for {q:?}"
+        );
+        assert_eq!(
+            got_paths, want_paths,
+            "{name}: {kind} search for {q:?} (paths)"
+        );
+    }
     db.dirs(&id, "", &f).unwrap();
     db.authors(&id).unwrap();
 }

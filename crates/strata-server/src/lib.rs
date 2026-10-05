@@ -74,7 +74,7 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
-fn arrow(bytes: Vec<u8>) -> Response {
+fn arrow(bytes: axum::body::Bytes) -> Response {
     (
         [(header::CONTENT_TYPE, "application/vnd.apache.arrow.stream")],
         bytes,
@@ -545,11 +545,14 @@ async fn repo_compare(
     ))
 }
 
+/// `?brief=1`: only the commit row (what the transport bar shows while playing).
 async fn repo_step(
     State(st): State<Shared>,
     Path((repo, n)): Path<(String, u32)>,
+    Query(q): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<Value>> {
-    Ok(Json(blocking(move || st.db.step(&repo, n)).await?))
+    let brief = q.get("brief").is_some_and(|v| v == "1");
+    Ok(Json(blocking(move || st.db.step(&repo, n, brief)).await?))
 }
 
 async fn repo_commits(

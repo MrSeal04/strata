@@ -1,12 +1,13 @@
 //! Query layer: one in-memory DuckDB with a schema per loaded repo (small tables materialized,
 //! large ones as views over the Parquet parts). Bulk results go out as Arrow IPC streams.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::{Context, bail};
 use arrow::ipc::writer::StreamWriter;
+use bytes::Bytes;
 use duckdb::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -26,11 +27,14 @@ pub struct Db {
     cache: Mutex<QueryCache>,
     /// Serializes lazy aggregate creation.
     agg_lock: Mutex<()>,
+    /// Lazily built tables known to exist (`schema.table`), so requests skip the build check.
+    built: Mutex<HashSet<String>>,
 }
 
 #[derive(Default)]
 struct QueryCache {
-    entries: HashMap<String, (std::sync::Arc<Vec<u8>>, u64)>,
+    /// `Bytes` clones share the buffer: a hit hands out the cached result without copying it.
+    entries: HashMap<String, (Bytes, u64)>,
     bytes: usize,
     tick: u64,
 }
@@ -38,7 +42,7 @@ struct QueryCache {
 const CACHE_BYTES: usize = 256 << 20;
 
 impl QueryCache {
-    fn get(&mut self, sql: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+    fn get(&mut self, sql: &str) -> Option<Bytes> {
         self.tick += 1;
         let tick = self.tick;
         self.entries.get_mut(sql).map(|(v, t)| {
@@ -47,7 +51,7 @@ impl QueryCache {
         })
     }
 
-    fn put(&mut self, sql: &str, v: std::sync::Arc<Vec<u8>>) {
+    fn put(&mut self, sql: &str, v: Bytes) {
         if v.len() > CACHE_BYTES / 4 {
             return;
         }
@@ -340,6 +344,7 @@ impl Db {
             layout,
             cache: Mutex::new(QueryCache::default()),
             agg_lock: Mutex::new(()),
+            built: Mutex::new(HashSet::new()),
         })
     }
 
@@ -360,16 +365,22 @@ impl Db {
     }
 
     /// `ipc` with a result cache (every query is deterministic for a given loaded repo).
-    fn ipc_cached(&self, c: &Connection, sql: &str) -> anyhow::Result<Vec<u8>> {
+    fn ipc_cached(&self, c: &Connection, sql: &str) -> anyhow::Result<Bytes> {
         if let Some(v) = self.cache.lock().unwrap().get(sql) {
-            return Ok(v.as_ref().clone());
+            return Ok(v);
         }
-        let v = ipc(c, sql)?;
-        self.cache
+        let v = Bytes::from(ipc(c, sql)?);
+        self.cache.lock().unwrap().put(sql, v.clone());
+        Ok(v)
+    }
+
+    /// Forget the lazily built tables of `schema` (its tables are being dropped).
+    fn forget_built(&self, schema: &str) {
+        let prefix = format!("{schema}.");
+        self.built
             .lock()
             .unwrap()
-            .put(sql, std::sync::Arc::new(v.clone()));
-        Ok(v)
+            .retain(|t| !t.starts_with(&prefix));
     }
 
     fn give_back(&self, c: Connection) {
@@ -474,6 +485,7 @@ impl Db {
              CREATE TABLE {schema}.canon AS SELECT a.author_id, a.canonical_id, c.name, c.email, a.is_bot
                FROM {schema}.authors a JOIN {schema}.authors c ON c.author_id = a.canonical_id;"
         );
+        self.forget_built(&schema);
         conn.execute_batch(&sql)
             .with_context(|| format!("loading repo {repo}"))?;
         *self.cache.lock().unwrap() = QueryCache::default();
@@ -485,6 +497,7 @@ impl Db {
     pub fn unload(&self, repo: &str) -> anyhow::Result<()> {
         let mut loaded = self.loaded.lock().unwrap();
         if let Some((schema, _)) = loaded.remove(repo) {
+            self.forget_built(&schema);
             self.base
                 .lock()
                 .unwrap()
@@ -495,19 +508,19 @@ impl Db {
     }
 
     /// Per-step axis times (seconds, monotonic) and flags, for client-side axis mapping.
-    pub fn axis(&self, repo: &str) -> anyhow::Result<Vec<u8>> {
+    pub fn axis(&self, repo: &str) -> anyhow::Result<Bytes> {
         self.with(repo, |c, s| {
-            ipc(
+            Ok(Bytes::from(ipc(
                 c,
                 &format!(
                     "SELECT st.axis_time::DOUBLE AS t, st.flags, st.is_merge, k.canonical_id AS author FROM {s}.steps st LEFT JOIN {s}.canon k ON k.author_id = st.author_id ORDER BY st.step"
                 ),
-            )
+            )?))
         })
     }
 
     /// Path dictionary.
-    pub fn paths(&self, repo: &str) -> anyhow::Result<Vec<u8>> {
+    pub fn paths(&self, repo: &str) -> anyhow::Result<Bytes> {
         self.with(repo, |c, s| {
             self.ipc_cached(c, &format!("SELECT path_id, path, lang, category, first_step, last_step FROM {s}.paths ORDER BY path_id"))
         })
@@ -556,7 +569,7 @@ impl Db {
     }
 
     /// Binned per-commit additions/deletions.
-    pub fn bars(&self, repo: &str, f: &Filters, b: &Bins) -> anyhow::Result<Vec<u8>> {
+    pub fn bars(&self, repo: &str, f: &Filters, b: &Bins) -> anyhow::Result<Bytes> {
         self.with(repo, |c, s| {
             let (bin, below_hi) = b.bin_expr();
             self.ipc_cached(c, &format!(
@@ -697,13 +710,7 @@ impl Db {
     /// Stacked area series in long format: (bin, key, value) for size, (bin, key, adds, dels) for flow.
     /// Size rows are cumulative per key at the bins where the key changed; bin -1 is the baseline
     /// before `lo`. Clients forward-fill.
-    pub fn area(
-        &self,
-        repo: &str,
-        f: &Filters,
-        b: &Bins,
-        q: &AreaQuery,
-    ) -> anyhow::Result<Vec<u8>> {
+    pub fn area(&self, repo: &str, f: &Filters, b: &Bins, q: &AreaQuery) -> anyhow::Result<Bytes> {
         self.with(repo, |c, s| {
             let (bin, below_hi) = b.bin_expr();
             let (k0, label) = self.area_k0(c, s, f, q)?;
@@ -735,13 +742,7 @@ impl Db {
 
     /// The keys an area query labels (the rest is "(other)"), best first: (key, label). Views
     /// that break the same data down another way (the treemap's bands) use exactly these.
-    pub fn keys(
-        &self,
-        repo: &str,
-        f: &Filters,
-        b: &Bins,
-        q: &AreaQuery,
-    ) -> anyhow::Result<Vec<u8>> {
+    pub fn keys(&self, repo: &str, f: &Filters, b: &Bins, q: &AreaQuery) -> anyhow::Result<Bytes> {
         self.with(repo, |c, s| {
             let (k0, label) = self.area_k0(c, s, f, q)?;
             let rank = rank_sql(s, q, b);
@@ -764,7 +765,7 @@ impl Db {
         repo: &str,
         f: &Filters,
         q: &CompositionQuery,
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> anyhow::Result<Bytes> {
         self.with(repo, |c, s| {
             let (src, grouped) = origin_rows(s, f, q, false);
             let sql = match q.mode {
@@ -784,12 +785,7 @@ impl Db {
 
     /// Per-step rows of `composition` over `(from, to]` for forward playback: (step, path_id, k, v)
     /// where v adds to the file's value (a signed delta for size, lines changed for flow).
-    pub fn origins(
-        &self,
-        repo: &str,
-        f: &Filters,
-        q: &CompositionQuery,
-    ) -> anyhow::Result<Vec<u8>> {
+    pub fn origins(&self, repo: &str, f: &Filters, q: &CompositionQuery) -> anyhow::Result<Bytes> {
         self.with(repo, |c, s| {
             let (src, grouped) = origin_rows(s, f, q, true);
             let sql = match q.mode {
@@ -853,14 +849,19 @@ impl Db {
                 ),
             ),
         };
+        let key = format!("{s}.{table}");
+        if self.built.lock().unwrap().contains(&key) {
+            return Ok(table);
+        }
         let _guard = self.agg_lock.lock().unwrap();
         c.execute_batch(&sql)
             .with_context(|| format!("building {table}"))?;
+        self.built.lock().unwrap().insert(key);
         Ok(table)
     }
 
     /// File state after `step`: nearest keyframe plus later changes, with each file's last edit.
-    pub fn state(&self, repo: &str, step: u32, f: &Filters) -> anyhow::Result<Vec<u8>> {
+    pub fn state(&self, repo: &str, step: u32, f: &Filters) -> anyhow::Result<Bytes> {
         self.with(repo, |c, s| {
             self.ensure_rename_edits(c, s)?;
             self.ipc_cached(c, &state_sql_edited(s, step, f))
@@ -872,6 +873,10 @@ impl Db {
     /// came from (through chains of moves). Every other change row is an edit at its own step.
     fn ensure_rename_edits(&self, c: &Connection, s: &str) -> anyhow::Result<()> {
         use arrow::array::{Array, BooleanArray, UInt8Array, UInt32Array};
+        let key = format!("{s}.rename_edits");
+        if self.built.lock().unwrap().contains(&key) {
+            return Ok(());
+        }
         let _guard = self.agg_lock.lock().unwrap();
         let have: i64 = c.query_row(
             "SELECT count(*) FROM duckdb_tables() WHERE schema_name = ? AND table_name = 'rename_edits'",
@@ -879,6 +884,7 @@ impl Db {
             |r| r.get(0),
         )?;
         if have > 0 {
+            self.built.lock().unwrap().insert(key);
             return Ok(());
         }
         // Within a step, removals (deleted, moved away) come first, so a move's source is
@@ -956,11 +962,12 @@ impl Db {
         c.execute_batch(&format!(
             "ALTER TABLE {s}.rename_edits_tmp RENAME TO rename_edits;"
         ))?;
+        self.built.lock().unwrap().insert(key);
         Ok(())
     }
 
     /// Change events in (from, to], for forward playback. `edited` follows the /state rule.
-    pub fn events(&self, repo: &str, from: i64, to: u32, f: &Filters) -> anyhow::Result<Vec<u8>> {
+    pub fn events(&self, repo: &str, from: i64, to: u32, f: &Filters) -> anyhow::Result<Bytes> {
         self.with(repo, |c, s| {
             self.ensure_rename_edits(c, s)?;
             self.ipc_cached(c, &format!(
@@ -980,7 +987,7 @@ impl Db {
 
     /// Lines added and deleted per file over `(from, to]` (text files; deleted files included),
     /// with the last step that changed it: the treemap's churn view.
-    pub fn churn(&self, repo: &str, from: i64, to: u32, f: &Filters) -> anyhow::Result<Vec<u8>> {
+    pub fn churn(&self, repo: &str, from: i64, to: u32, f: &Filters) -> anyhow::Result<Bytes> {
         self.with(repo, |c, s| {
             self.ipc_cached(c, &format!(
                 "SELECT c.path_id, sum(c.{a})::INTEGER AS adds, sum(c.{d})::INTEGER AS dels, max(c.step)::INTEGER AS last_step
@@ -996,7 +1003,7 @@ impl Db {
     /// at `to` (0 once deleted), whether it's binary, and the last step it was alive in its own
     /// right (added or changed; `from` if untouched since), which tells a path that was only
     /// ever renamed away from one that came back.
-    pub fn span(&self, repo: &str, from: u32, to: u32, f: &Filters) -> anyhow::Result<Vec<u8>> {
+    pub fn span(&self, repo: &str, from: u32, to: u32, f: &Filters) -> anyhow::Result<Bytes> {
         self.with(repo, |c, s| {
             self.ipc_cached(c, &format!(
                 "WITH st AS ({start}),
@@ -1016,7 +1023,7 @@ impl Db {
     }
 
     /// Renames over `(from, to]`: (step, path_id, old_path_id), oldest first.
-    pub fn renames(&self, repo: &str, from: u32, to: u32) -> anyhow::Result<Vec<u8>> {
+    pub fn renames(&self, repo: &str, from: u32, to: u32) -> anyhow::Result<Bytes> {
         self.with(repo, |c, s| {
             self.ipc_cached(c, &format!(
                 "SELECT step::INTEGER AS step, path_id, old_path_id FROM {s}.changes
@@ -1026,7 +1033,7 @@ impl Db {
     }
 
     /// Per-path lines at two steps.
-    pub fn compare(&self, repo: &str, a: u32, b: u32, f: &Filters) -> anyhow::Result<Vec<u8>> {
+    pub fn compare(&self, repo: &str, a: u32, b: u32, f: &Filters) -> anyhow::Result<Bytes> {
         self.with(repo, |c, s| {
             self.ipc_cached(c, &format!(
                 "WITH sa AS ({qa}), sb AS ({qb})
@@ -1038,9 +1045,21 @@ impl Db {
         })
     }
 
-    /// Details for one step: commit, touched files, side commits, tags.
-    pub fn step(&self, repo: &str, step: u32) -> anyhow::Result<Value> {
+    /// Details for one step: commit, touched files, side commits, tags. `brief` returns only the
+    /// commit, without its message (the transport bar asks several times a second while playing;
+    /// the message is read from the Parquet files).
+    pub fn step(&self, repo: &str, step: u32, brief: bool) -> anyhow::Result<Value> {
         self.with(repo, |c, s| {
+            if brief {
+                let head = json_rows(c, &format!(
+                    "SELECT st.step, st.sha, st.author_time::DOUBLE AS author_time, st.axis_time::DOUBLE AS axis_time,
+                            st.is_merge, st.side_count, st.summary, st.adds, st.dels, st.adds_ws, st.dels_ws,
+                            st.files_changed, st.flags, a.name AS author, a.canonical_id AS author_id
+                     FROM {s}.steps st LEFT JOIN {s}.canon a ON a.author_id = st.author_id
+                     WHERE st.step = {step}"
+                ))?;
+                return Ok(json!({ "commit": head.into_iter().next() }));
+            }
             let head = json_rows(c, &format!(
                 "SELECT st.step, st.sha, st.author_time::DOUBLE AS author_time, st.commit_time::DOUBLE AS commit_time,
                         st.axis_time::DOUBLE AS axis_time, st.is_merge, st.side_count, st.summary, m.message,
@@ -1091,43 +1110,49 @@ impl Db {
         })
     }
 
-    /// Search commits by message, author or path. Returns matching steps and path ids.
+    /// Search commits by message, author or path (case-insensitive substring). Returns matching
+    /// steps and path ids.
     pub fn search(&self, repo: &str, q: &str, kind: &str, limit: u32) -> anyhow::Result<Value> {
-        let pat = sql_str(&format!(
-            "%{}%",
-            q.replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        ));
+        // `contains(lower(x), lower(q))` matches what `ILIKE '%q%'` did, 2-3x faster: a message
+        // search on Linux (1.4M side-commit summaries) went from ~240 ms to ~90 ms.
+        let needle = format!("lower({})", sql_str(q));
+        let has = |col: &str| format!("contains(lower({col}), {needle})");
         self.with(repo, |c, s| {
             let (steps_sql, paths_sql) = match kind {
                 "author" => (
                     format!(
                         "SELECT DISTINCT step FROM (
                            SELECT st.step FROM {s}.steps st JOIN {s}.canon k ON k.author_id = st.author_id
-                           WHERE k.name ILIKE {pat} ESCAPE '\\' OR k.email ILIKE {pat} ESCAPE '\\'
+                           WHERE {name} OR {email}
                            UNION ALL
                            SELECT sc.landing_step FROM {s}.side_commits sc JOIN {s}.canon k ON k.author_id = sc.author_id
-                           WHERE k.name ILIKE {pat} ESCAPE '\\' OR k.email ILIKE {pat} ESCAPE '\\')
-                         ORDER BY step LIMIT {limit}"
+                           WHERE {name} OR {email})
+                         ORDER BY step LIMIT {limit}",
+                        name = has("k.name"),
+                        email = has("k.email"),
                     ),
                     None,
                 ),
                 "path" => (
                     format!(
                         "SELECT DISTINCT c.step FROM {s}.changes c JOIN {s}.paths p USING (path_id)
-                         WHERE p.path ILIKE {pat} ESCAPE '\\' ORDER BY c.step LIMIT {limit}"
+                         WHERE {path} ORDER BY c.step LIMIT {limit}",
+                        path = has("p.path"),
                     ),
-                    Some(format!("SELECT path_id FROM {s}.paths WHERE path ILIKE {pat} ESCAPE '\\' LIMIT {limit}")),
+                    Some(format!(
+                        "SELECT path_id FROM {s}.paths WHERE {path} LIMIT {limit}",
+                        path = has("path"),
+                    )),
                 ),
                 _ => (
                     format!(
                         "SELECT DISTINCT step FROM (
-                           SELECT step FROM {s}.messages WHERE message ILIKE {pat} ESCAPE '\\'
-                           UNION ALL SELECT landing_step FROM {s}.side_commits WHERE summary ILIKE {pat} ESCAPE '\\'
-                           UNION ALL SELECT step FROM {s}.steps WHERE sha LIKE {pre})
+                           SELECT step FROM {s}.messages WHERE {message}
+                           UNION ALL SELECT landing_step FROM {s}.side_commits WHERE {summary}
+                           UNION ALL SELECT step FROM {s}.steps WHERE starts_with(sha, {needle}))
                          ORDER BY step LIMIT {limit}",
-                        pre = sql_str(&format!("{}%", q.to_lowercase().replace('\'', "")))
+                        message = has("message"),
+                        summary = has("summary"),
                     ),
                     None,
                 ),

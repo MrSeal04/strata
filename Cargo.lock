@@ -3182,6 +3182,7 @@ version = "0.1.5"
 dependencies = [
  "anyhow",
  "arrow",
+ "bytes",
  "dirs",
  "duckdb",
  "libc",
