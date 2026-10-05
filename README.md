@@ -65,7 +65,7 @@ same binary as a `.deb`, which also adds strata to the app launcher.
 | `strata serve` | Serve every cached repo (`--port`, `--host`, `--no-open`). |
 | `strata app` | What the app launcher's **strata** entry runs, in a terminal window: opens the dashboard in the strata server already running, or starts one that runs until you close that window (or press Ctrl-C). `--exit-when-idle` instead stops it 10 minutes after the last dashboard tab closes, for a launcher without a terminal. |
 | `strata render REPO -o out.mp4` | Record playback headlessly (Chrome, Chromium or Firefox, plus ffmpeg). Options: `--view`, `--duration`, `--fps`, `--scale`, `--size 1600x900`, `--from/--to`, `--theme`, `--color-by`, `--tree-layout`, `--area-slice`, `--actors`. Writes `.mp4`, `.webm` or `.gif`. |
-| `strata list` / `strata gc --older-than 90` | List cached repos, or delete stale ones and their clones. |
+| `strata list` / `strata gc --older-than 90` | List cached repos, or delete stale ones and their clones, along with what interrupted extractions left behind (`--dry-run` only lists what it would delete). |
 | `strata bench SOURCE` | Time the extraction and every query endpoint. Reports peak memory, cache size, and merge-blame work. `--verify N` checks survival attribution against `git blame -w` on N sampled files. |
 
 The cache lives in `~/.cache/strata` (or `$STRATA_HOME`). URL sources are mirrored as bare clones
