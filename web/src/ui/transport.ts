@@ -4,6 +4,8 @@ import { CanvasPainter } from "../paint/canvas";
 import type { PlayMode } from "../state/store";
 import { palette } from "../theme";
 import { fmt, h, icon } from "./dom";
+import { dragMarker, drawMarker, markerHit, markerTip } from "./markers";
+import { tooltip } from "./tooltip";
 
 /** Play/pause, stepping, speed, loop, a full-history scrubber, and the current commit. */
 export class Transport {
@@ -53,13 +55,21 @@ export class Transport {
       h("div", { class: "scrub" }, this.scrub),
       now,
     );
+    const stepAt = (clientX: number) => {
+      const r = this.scrub.getBoundingClientRect();
+      const t = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+      return Math.round(t * (store.get().steps - 1));
+    };
+    let draggingMarker = false;
     this.scrub.addEventListener("pointerdown", (e) => {
+      const hit = this.markerAt(e);
+      if (hit) {
+        draggingMarker = true;
+        dragMarker(app, this.scrub, e, hit, stepAt, () => (draggingMarker = false));
+        return;
+      }
       this.scrub.setPointerCapture(e.pointerId);
-      const seek = (ev: PointerEvent) => {
-        const r = this.scrub.getBoundingClientRect();
-        const t = Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width));
-        app.player.seek(Math.round(t * (store.get().steps - 1)));
-      };
+      const seek = (ev: PointerEvent) => app.player.seek(stepAt(ev.clientX));
       seek(e);
       const move = (ev: PointerEvent) => seek(ev);
       const up = () => {
@@ -69,12 +79,23 @@ export class Transport {
       this.scrub.addEventListener("pointermove", move);
       this.scrub.addEventListener("pointerup", up);
     });
+    this.scrub.addEventListener("pointermove", (e) => {
+      if (draggingMarker || e.buttons) return;
+      const hit = this.markerAt(e);
+      this.scrub.style.cursor = hit ? "ew-resize" : "";
+      if (hit) markerTip(app, hit, e.clientX, e.clientY, false);
+      else tooltip.hide();
+    });
+    this.scrub.addEventListener("pointerleave", () => {
+      if (!draggingMarker) tooltip.hide();
+    });
     new ResizeObserver(() => this.drawScrub()).observe(this.scrub);
     store.watch((s) => [s.playing, s.settings.loop, s.settings.playMode, s.settings.fixedSeconds, s.settings.commitsPerSec, s.settings.daysPerSec], () => this.syncControls(), true);
-    store.watch((s) => [s.cursor, s.brush, s.search?.steps.length, s.compare, s.settings.theme], () => {
+    store.watch((s) => [s.cursor, s.brush, s.search?.steps.length, s.settings.theme], () => {
       this.drawScrub();
       this.scheduleSummary();
     });
+    store.watch((s) => s.compare, () => this.drawScrub());
     store.watch((s) => s.filterRev, () => this.loadChurn());
     this.loadChurn();
     this.scheduleSummary();
@@ -89,6 +110,21 @@ export class Transport {
     const st = s.settings;
     this.speedInput.value = String(st.playMode === "fixed" ? st.fixedSeconds : st.playMode === "commits" ? st.commitsPerSec : st.daysPerSec);
     this.speedInput.title = st.playMode === "fixed" ? "Total run length in seconds" : st.playMode === "commits" ? "Commits per second" : "Days of history per second";
+  }
+
+  /** Scrubber x (px) of a step. */
+  private stepX(step: number): number {
+    return ((step + 0.5) / Math.max(1, this.app.store.get().steps)) * this.scrub.getBoundingClientRect().width;
+  }
+
+  /** The compare marker under the pointer, if any; the playhead's knob wins over one. */
+  private markerAt(e: PointerEvent) {
+    const s = this.app.store.get();
+    if (!s.compare) return null;
+    const r = this.scrub.getBoundingClientRect();
+    const x = e.clientX - r.left;
+    if (Math.abs(x - this.stepX(s.cursor)) <= 7 && e.clientY - r.top >= r.height - 18) return null;
+    return markerHit(this.stepX(s.compare.a), this.stepX(s.compare.b), x);
   }
 
   /** Churn sparkline for the whole history, one bin per scrubber pixel. */
@@ -149,7 +185,7 @@ export class Transport {
     }
     for (const t of this.app.summary.tags) p.line(x(t.step), mid + 4, x(t.step), mid + 8, pal.inkMuted, 1);
     if (s.search?.steps.length) for (const st of s.search.steps) p.rect(x(st) - 0.5, mid + 3, 1, 5, pal.accent);
-    if (s.compare) for (const st of [s.compare.a, s.compare.b]) p.line(x(st), 2, x(st), r.height - 2, pal.accent, 1.5);
+    if (s.compare) for (const [st, label] of [[s.compare.a, "A"], [s.compare.b, "B"]] as const) drawMarker(p, x(st), 1, r.height - 1, label);
     const cx = x(s.cursor);
     p.rect(0, mid - 1, cx, 3, pal.ink, 0.7);
     p.circle(cx, mid + 0.5, 6, pal.ink, 1, pal.surface, 2);

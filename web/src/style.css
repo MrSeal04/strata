@@ -136,6 +136,14 @@ input[type="range"] { accent-color: var(--accent); }
 }
 .filterbar .title { font-weight: 600; font-size: 14px; margin-right: 4px; white-space: nowrap; }
 .filterbar .grow { flex: 1; }
+.filterbar .ab { display: inline-flex; gap: 6px; }
+.filterbar .ab label { display: inline-flex; align-items: center; gap: 4px; }
+.filterbar .ab input { appearance: textfield; padding: 0 6px; }
+.filterbar .ab input::-webkit-inner-spin-button, .filterbar .ab input::-webkit-outer-spin-button { appearance: none; margin: 0; }
+.ab-tag {
+  display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 3px;
+  background: var(--accent); color: #fff; font-size: 10px; font-weight: 700;
+}
 .crumbs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow: hidden; }
 .crumbs button { border: 0; background: none; padding: 2px 4px; border-radius: 4px; cursor: pointer; color: var(--ink-2); }
 .crumbs button:hover { background: var(--surface-2); color: var(--ink); }

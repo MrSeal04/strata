@@ -20,7 +20,8 @@ the history back in a browser dashboard with four linked views:
 
 One timeline drives all four views. You can play it back (fixed length, commits per second, or
 days per second), scrub, brush a range, search, filter by category, language or author, compare
-two points, and export PNG, SVG, MP4 or GIF.
+two points (drag their A and B markers along any timeline, or type commit numbers), and export
+PNG, SVG, MP4 or GIF.
 
 ![The strata dashboard on the Linux kernel at v7.3-rc1, dark theme](docs/dashboard.png)
 

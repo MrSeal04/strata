@@ -81,7 +81,7 @@ export async function openCommit(app: App, step: number) {
   );
 }
 
-/** Compare summary: totals, born/died, top-moving folders and files, editable A/B. */
+/** Compare summary: totals, born/died, top-moving folders and files. */
 export function openCompareSummary(app: App, anchor: HTMLElement) {
   const s = app.store.get();
   const d = app.compare.data;
@@ -127,16 +127,9 @@ export function openCompareSummary(app: App, anchor: HTMLElement) {
     }
     return tr;
   };
-  const stepInput = (value: number, set: (v: number) => void) => {
-    const el = h("input", { type: "number", min: "1", max: String(s.steps), value: String(value + 1), style: "width:90px" });
-    el.addEventListener("change", () => set(Math.max(0, Math.min(s.steps - 1, Number(el.value) - 1))));
-    return el;
-  };
-  const cmp = s.compare;
   const body = h("div", { class: "commit-panel" },
-    h("h3", { text: "Compare" }),
-    h("label", { class: "row" }, h("span", { text: `A (commit #, ${fmt.date(app.tl.time(cmp.a))})` }), stepInput(cmp.a, (a) => app.store.set({ compare: { ...cmp, a } }))),
-    h("label", { class: "row" }, h("span", { text: `B (commit #, ${fmt.date(app.tl.time(cmp.b))})` }), stepInput(cmp.b, (b) => app.store.set({ compare: { ...cmp, b } }))),
+    h("h3", { text: `Compare #${fmt.int(d.a + 1)} → #${fmt.int(d.b + 1)}` }),
+    h("div", { class: "muted", text: `${fmt.date(app.tl.time(d.a))} → ${fmt.date(app.tl.time(d.b))}` }),
     h("div", { class: "num", style: "margin:8px 0" },
       h("span", { text: `${fmt.int(sumA)} → ${fmt.int(sumB)} lines ` }),
       h("span", { class: sumB >= sumA ? "a" : "d", style: `color:var(${sumB >= sumA ? "--add" : "--del"})`, text: `(${fmt.signed(sumB - sumA)})` }),

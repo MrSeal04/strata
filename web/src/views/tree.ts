@@ -155,7 +155,7 @@ export class TreeView extends View {
     const legend = () => renderColorLegend(app, this.legend, app.store.get().settings.treeColorBy);
     // (the last-edited scale stretches with the history's age at the cursor)
     const spanKey = (s: { settings: { treeColorBy: string } }) => (s.settings.treeColorBy === "edited" ? Math.round(Math.log(heatSpan(app)) * 8) : 0);
-    app.store.watch((s) => [s.settings.treeColorBy, s.compare, s.langs, s.authors, s.root, s.settings.areaDepth, s.settings.cohortUnit, s.settings.theme, s.settings.diffColors, spanKey(s)], legend, true);
+    app.store.watch((s) => [s.settings.treeColorBy, !!s.compare, s.langs, s.authors, s.root, s.settings.areaDepth, s.settings.cohortUnit, s.settings.theme, s.settings.diffColors, spanKey(s)], legend, true);
     // Directory colors are handed out by whichever card shows directories (see ensureDirColors).
     colorMaps.dir.onChange(() => {
       if (app.store.get().settings.treeColorBy !== "dir") return;

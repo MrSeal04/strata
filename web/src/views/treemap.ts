@@ -136,7 +136,7 @@ export class TreemapView extends View {
     const legend = () => renderColorLegend(app, this.legend, app.store.get().settings.colorBy);
     // (the last-edited scale stretches with the history's age at the cursor)
     const spanKey = (s: { settings: { colorBy: string } }) => (s.settings.colorBy === "edited" ? Math.round(Math.log(heatSpan(app)) * 8) : 0);
-    app.store.watch((s) => [s.settings.colorBy, s.compare, s.langs, s.authors, s.root, s.settings.areaDepth, s.settings.cohortUnit, s.settings.theme, s.settings.diffColors, spanKey(s)], legend, true);
+    app.store.watch((s) => [s.settings.colorBy, !!s.compare, s.langs, s.authors, s.root, s.settings.areaDepth, s.settings.cohortUnit, s.settings.theme, s.settings.diffColors, spanKey(s)], legend, true);
     colorMaps.dir.onChange(() => {
       if (app.store.get().settings.colorBy === "dir") legend();
     });
@@ -149,11 +149,13 @@ export class TreemapView extends View {
       legend();
       this.invalidate();
     });
-    app.store.watch((s) => [s.root, s.compare, s.filterRev, s.settings.colorBy, s.settings.areaDepth, s.settings.cohortUnit, s.settings.treemapMeasure, s.brush, s.settings.treemapLayout], () => {
+    // (moving A or B relays out only once its comparison loads, through app.compare.onChange)
+    app.store.watch((s) => [s.root, !!s.compare, s.compare?.mode, s.filterRev, s.settings.colorBy, s.settings.areaDepth, s.settings.cohortUnit, s.settings.treemapMeasure, s.brush, s.settings.treemapLayout], () => {
       this.layoutKey = "";
       this.updateTitle();
       this.invalidate();
     }, true);
+    app.store.watch((s) => [s.compare?.a, s.compare?.b], () => this.updateTitle());
     // (the title says when the cursor is outside the steady layout's range)
     app.store.watch((s) => (s.settings.treemapLayout === "steady" ? this.steady.usable() : true), () => this.updateTitle());
     app.compare.onChange(() => {

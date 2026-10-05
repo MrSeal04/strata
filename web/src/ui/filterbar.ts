@@ -18,6 +18,8 @@ export class FilterBar {
   private searchKind: HTMLSelectElement;
   private searchInfo: HTMLElement;
   private compareBtn: HTMLButtonElement;
+  private abEl: HTMLElement;
+  private abInputs: { a: HTMLInputElement; b: HTMLInputElement };
   private summaryBtn: HTMLButtonElement;
   private brushBtn: HTMLButtonElement;
 
@@ -59,6 +61,22 @@ export class FilterBar {
     this.brushBtn.addEventListener("click", () => store.set({ brush: null }));
     this.compareBtn = h("button", { class: "btn", title: "Compare two points: the selected range's ends, or start vs. now" }, icon("compare"), "Compare");
     this.compareBtn.addEventListener("click", () => this.toggleCompare());
+    // A and B as commit numbers (1-based); the markers in the timeline drag them too.
+    const abInput = (end: "a" | "b") => {
+      const el = h("input", { type: "number", min: "1", class: "num", "aria-label": `${end.toUpperCase()}: commit number` });
+      el.addEventListener("change", () => {
+        const v = Number(el.value);
+        if (el.value !== "" && Number.isFinite(v)) app.compare.move(end, v - 1);
+        const c = store.get().compare;
+        if (c) el.value = String(c[end] + 1);
+      });
+      return el;
+    };
+    this.abInputs = { a: abInput("a"), b: abInput("b") };
+    this.abEl = h("span", { class: "ab" },
+      h("label", {}, h("span", { class: "ab-tag", text: "A" }), this.abInputs.a),
+      h("label", {}, h("span", { class: "ab-tag", text: "B" }), this.abInputs.b),
+    );
     this.summaryBtn = h("button", { class: "btn", title: "What changed between A and B", text: "Summary" });
     this.summaryBtn.addEventListener("click", () => openCompareSummary(app, this.summaryBtn));
     app.compare.onChange(() => this.render());
@@ -71,7 +89,7 @@ export class FilterBar {
     this.el = h("header", { class: "filterbar" },
       home, name, this.crumbs, h("span", { class: "sep" }), this.chips, this.langBtn, this.authorBtn, this.botsBtn, this.wsBtn,
       h("span", { class: "sep" }), this.searchKind, this.searchInput, this.searchInfo,
-      h("span", { class: "grow" }), this.brushBtn, this.compareBtn, this.summaryBtn, exportBtn, settingsBtn, themeBtn,
+      h("span", { class: "grow" }), this.brushBtn, this.compareBtn, this.abEl, this.summaryBtn, exportBtn, settingsBtn, themeBtn,
     );
     store.watch((s) => [s.root, s.langs, s.authors, s.settings.exclude, s.settings.hideBots, s.settings.ws, s.brush, s.compare, s.search?.steps.length], () => this.render(), true);
   }
@@ -105,6 +123,18 @@ export class FilterBar {
     this.brushBtn.style.display = s.brush ? "" : "none";
     if (s.brush) this.brushBtn.textContent = `Range #${fmt.int(s.brush[0] + 1)}–#${fmt.int(s.brush[1] + 1)} ✕`;
     this.compareBtn.classList.toggle("on", !!s.compare);
+    this.abEl.style.display = s.compare ? "" : "none";
+    if (s.compare) {
+      for (const end of ["a", "b"] as const) {
+        const el = this.abInputs[end];
+        const step = s.compare[end];
+        el.max = String(s.steps);
+        el.style.width = `calc(${String(s.steps).length + 1}ch + 18px)`;
+        // (not while typing into it)
+        if (document.activeElement !== el) el.value = String(step + 1);
+        el.title = `${end.toUpperCase()}: commit #${fmt.int(step + 1)}, ${fmt.date(this.app.tl.time(step))}`;
+      }
+    }
     this.summaryBtn.style.display = s.compare && this.app.compare.data ? "" : "none";
     this.searchInfo.textContent = s.search ? `${fmt.int(s.search.steps.length)} commits${s.search.paths.size ? ` · ${fmt.int(s.search.paths.size)} files` : ""}` : "";
   }

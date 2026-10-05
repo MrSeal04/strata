@@ -3,6 +3,7 @@ import type { App } from "../app";
 import type { Painter } from "../paint/painter";
 import { palette } from "../theme";
 import { fmt } from "../ui/dom";
+import { type MarkerHit, dragMarker, drawMarker, markerHit, markerTip } from "../ui/markers";
 
 export interface Margins {
   left: number;
@@ -13,13 +14,15 @@ export interface Margins {
 
 /**
  * Shared x-axis machinery for the bars and area views: domain from brush/axis mode, the
- * px<->step mapping, axis ticks, tags, cursor, and brush/seek interaction.
+ * px<->step mapping, axis ticks, tags, cursor, brush/seek interaction and the compare markers.
  */
 export class TimeStrip {
   lo = 0;
   hi = 1;
   plotW = 1;
   drag: { x0: number; x1: number; moved: boolean } | null = null;
+  /** A compare marker is being dragged. */
+  private markerDrag = false;
 
   constructor(
     private app: App,
@@ -33,6 +36,11 @@ export class TimeStrip {
     [this.lo, this.hi] = this.app.tl.domain(s.settings.axis, a, b);
     this.plotW = Math.max(1, width - this.m.left - this.m.right);
     return [a, b];
+  }
+
+  /** A brush or a compare marker is being dragged (views skip their hover). */
+  get dragging(): boolean {
+    return !!this.drag || this.markerDrag;
   }
 
   get axis() {
@@ -129,11 +137,29 @@ export class TimeStrip {
     if (cmp) {
       for (const [st, label] of [[cmp.a, "A"], [cmp.b, "B"]] as const) {
         const x = this.stepPx(st);
-        if (x < this.m.left || x > this.m.left + this.plotW) continue;
-        p.line(x, top, x, bottom, pal.accent, 1.5);
-        p.text(label, x + 3, top + 2, { color: pal.accent, size: 10, weight: 600, baseline: "top" });
+        // (the tab sits in the margin above the plot, like a ruler's flag)
+        if (x >= this.m.left && x <= this.m.left + this.plotW) drawMarker(p, x, top - 14, bottom, label);
       }
     }
+  }
+
+  /** The compare marker under x, if one is shown there. */
+  markerAt(x: number): MarkerHit | null {
+    const cmp = this.app.store.get().compare;
+    if (!cmp) return null;
+    const shown = (st: number) => {
+      const px = this.stepPx(st);
+      return px >= this.m.left && px <= this.m.left + this.plotW ? px : NaN;
+    };
+    return markerHit(shown(cmp.a), shown(cmp.b), x);
+  }
+
+  /** Hover: over a compare marker, show the grab cursor and its tooltip and return true. */
+  hoverMarker(x: number, e: PointerEvent, canvas: HTMLCanvasElement): boolean {
+    const hit = this.markerAt(x);
+    canvas.style.cursor = hit ? "ew-resize" : "";
+    if (hit) markerTip(this.app, hit, e.clientX, e.clientY, false);
+    return !!hit;
   }
 
   drawSearch(p: Painter, y: number) {
@@ -151,8 +177,18 @@ export class TimeStrip {
     }
   }
 
-  /** Start a drag (brush) or click (seek). Returns false if the point is outside the plot. */
+  /** Start a drag (a compare marker, or a brush) or click (seek). Returns false if the point is outside the plot. */
   pointerDown(x: number, e: PointerEvent, canvas: HTMLCanvasElement, redraw: () => void): boolean {
+    const hit = this.markerAt(x);
+    if (hit) {
+      this.markerDrag = true;
+      const stepAt = (clientX: number) => this.stepAtPx(clientX - canvas.getBoundingClientRect().left);
+      dragMarker(this.app, canvas, e, hit, stepAt, () => {
+        this.markerDrag = false;
+        redraw();
+      });
+      return true;
+    }
     if (x < this.m.left || x > this.m.left + this.plotW) return false;
     this.drag = { x0: x, x1: x, moved: false };
     canvas.setPointerCapture(e.pointerId);

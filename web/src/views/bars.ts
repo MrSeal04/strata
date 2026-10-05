@@ -275,14 +275,15 @@ export class BarsView extends View {
   }
 
   protected onPointerMove(x: number, _y: number, e: PointerEvent) {
-    if (this.strip.drag) return;
-    const i = this.binAt(x);
+    if (this.strip.dragging) return;
+    const onMarker = this.strip.hoverMarker(x, e, this.canvas);
+    const i = onMarker ? -1 : this.binAt(x);
     if (i !== this.hoverBin) {
       this.hoverBin = i;
       this.invalidate();
     }
     if (i < 0 || !this.data) {
-      tooltip.hide();
+      if (!onMarker) tooltip.hide();
       return;
     }
     this.showTip(i, e.clientX, e.clientY);

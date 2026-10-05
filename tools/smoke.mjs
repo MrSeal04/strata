@@ -2,7 +2,8 @@
 // Smoke test: extract a fixture into a temporary cache, serve it, open the home page and the
 // dashboard at desktop and phone widths, exercise every view mode, playback and zoom, the card
 // header options and unlinked cards, check that phones scroll the page until a card is zoomed,
-// update and then delete the repo from its home card, and fail on any page, console or HTTP error.
+// drag the compare markers, update and then delete the repo from its home card, and fail on any
+// page, console or HTTP error.
 // Usage: node tools/smoke.mjs [strata-binary] [out-dir]
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync } from "node:fs";
@@ -162,6 +163,78 @@ try {
     await drag();
     const s2 = await state();
     if (!(s2.y === 0 && s2.ty !== before.ty)) failures.push(`touch: a drag when zoomed should pan the treemap (${JSON.stringify({ before, after: s2 })})`);
+    await page.close();
+  }
+  // Compare: A and B sit beside the Compare button, and their markers drag like an editor's
+  // in/out points, on the charts and the scrubber, without moving the playhead or brushing.
+  {
+    const page = await browser.newPage();
+    page.on("pageerror", (e) => failures.push(`compare: page error: ${e.message}`));
+    page.on("console", (m) => m.type() === "error" && failures.push(`compare: console: ${m.text()}`));
+    page.on("response", (r) => r.status() >= 400 && failures.push(`compare: HTTP ${r.status()} ${r.url()}`));
+    await page.setViewport({ width: 1440, height: 900 });
+    await page.goto(`http://127.0.0.1:${port}/#/r/${id}`, { waitUntil: "networkidle0" });
+    await new Promise((r) => setTimeout(r, 1500));
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const get = () => page.evaluate(() => {
+      const s = window.strata.app.store.get();
+      return { steps: s.steps, cursor: s.cursor, brush: s.brush, ...s.compare, inputs: [...document.querySelectorAll(".filterbar .ab input")].map((i) => i.value) };
+    });
+    const last = await page.evaluate(() => {
+      const a = window.strata.app;
+      a.player.seek(a.store.get().steps - 1);
+      [...document.querySelectorAll(".filterbar button")].find((b) => b.textContent === "Compare").click();
+      return a.store.get().steps - 1;
+    });
+    await wait(600);
+    let s = await get();
+    if (s.a !== 0 || s.b !== last || s.inputs.join() !== `1,${last + 1}`) failures.push(`compare: A/B fields should read 1 and ${last + 1} (${JSON.stringify(s)})`);
+    const drag = async (x0, y, x1) => {
+      await page.mouse.move(x0, y);
+      await page.mouse.down();
+      for (let i = 1; i <= 8; i++) await page.mouse.move(x0 + ((x1 - x0) * i) / 8, y);
+      await page.mouse.up();
+      await wait(300);
+    };
+    // B on the bars, to the middle of the history.
+    const bars = await page.evaluate((st) => {
+      const v = window.strata.views.bars;
+      const r = v.canvas.getBoundingClientRect();
+      return { b: r.left + v.strip.stepPx(st), mid: r.left + v.strip.stepPx(Math.floor(st / 2)), y: r.top + r.height / 2 };
+    }, last);
+    await drag(bars.b, bars.y, bars.mid);
+    s = await get();
+    if (!(s.b < last && s.b > 0) || s.cursor !== last || s.brush) failures.push(`compare: dragging B on the bars should move B alone (${JSON.stringify(s)})`);
+    if (s.inputs[1] !== String(s.b + 1)) failures.push(`compare: the B field should follow the drag (${JSON.stringify(s)})`);
+    // A on the scrubber, past B: it stops just before B.
+    const scrub = await page.evaluate((st) => {
+      const c = document.querySelector(".transport .scrub canvas").getBoundingClientRect();
+      return { a: c.left + (0.5 / (st + 1)) * c.width, end: c.right - 2, y: c.top + 6 };
+    }, last);
+    const b = s.b;
+    await drag(scrub.a, scrub.y, scrub.end);
+    s = await get();
+    if (s.a !== b - 1 || s.b !== b || s.cursor !== last) failures.push(`compare: dragging A past B should stop it at B − 1 (${JSON.stringify(s)})`);
+    // Typed values clamp the same way.
+    await page.evaluate(() => {
+      const [a, b] = document.querySelectorAll(".filterbar .ab input");
+      a.value = "1";
+      a.dispatchEvent(new Event("change"));
+      b.value = "100000";
+      b.dispatchEvent(new Event("change"));
+    });
+    await wait(300);
+    s = await get();
+    if (s.a !== 0 || s.b !== last || s.inputs.join() !== `1,${last + 1}`) failures.push(`compare: typed A/B should clamp to the history (${JSON.stringify(s)})`);
+    const summaryInputs = await page.evaluate(async () => {
+      [...document.querySelectorAll(".filterbar button")].find((b) => b.textContent === "Summary").click();
+      await new Promise((r) => setTimeout(r, 200));
+      const n = document.querySelectorAll(".commit-panel input").length;
+      document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      return n;
+    });
+    if (summaryInputs) failures.push("compare: the Summary panel should no longer hold A/B fields");
+    await page.screenshot({ path: join(out, "compare.png") });
     await page.close();
   }
   // Last, since everything above reads kitchen: update it from its home card, then delete it.

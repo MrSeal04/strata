@@ -1,5 +1,5 @@
 import { api, col, filterParams } from "../api/client";
-import type { Store } from "../state/store";
+import type { Compare, State, Store } from "../state/store";
 import { FileTree, type Paths } from "./filetree";
 
 export interface CompareData {
@@ -13,11 +13,22 @@ export interface CompareData {
   treeB: FileTree;
 }
 
+function compareParams(s: State, c: Compare): URLSearchParams {
+  const p = filterParams(s);
+  p.set("a", String(c.a));
+  p.set("b", String(c.b));
+  return p;
+}
+
 /** Loads /compare once per (A, B, filters) and shares it between views. */
 export class CompareCache {
   data: CompareData | null = null;
   private pending = "";
   private listeners = new Set<() => void>();
+  /** Main-thread cost of showing the last comparison (ms): building it, then the next frame. */
+  private showMs = 0;
+  /** A marker is being dragged. */
+  private held = false;
 
   constructor(
     private store: Store,
@@ -31,6 +42,24 @@ export class CompareCache {
     this.listeners.add(fn);
   }
 
+  /**
+   * While a marker is dragged, comparisons follow it only if showing one is quick (on Linux it
+   * takes most of a second, which would stall the drag); otherwise they wait for the release.
+   */
+  hold(on: boolean) {
+    this.held = on;
+    if (!on) this.load();
+  }
+
+  /** Move A or B to `step`, keeping A before B. */
+  move(end: "a" | "b", step: number) {
+    const s = this.store.get();
+    const c = s.compare;
+    if (!c) return;
+    const v = Math.round(end === "a" ? Math.max(0, Math.min(c.b - 1, step)) : Math.max(c.a + 1, Math.min(s.steps - 1, step)));
+    if (v !== c[end]) this.store.set({ compare: { ...c, [end]: v } });
+  }
+
   private load() {
     const s = this.store.get();
     if (!s.compare) {
@@ -39,15 +68,16 @@ export class CompareCache {
       this.listeners.forEach((f) => f());
       return;
     }
-    const p = filterParams(s);
-    p.set("a", String(s.compare.a));
-    p.set("b", String(s.compare.b));
+    const p = compareParams(s, s.compare);
     const key = p.toString();
-    if (this.data?.key === key || this.pending === key) return;
+    // One request at a time: while A or B is dragged, the landing response shows a recent pair
+    // and reloads if the pair has moved on since.
+    if (this.data?.key === key || this.pending || (this.held && this.showMs > 50)) return;
     this.pending = key;
     const { a, b } = s.compare;
     api.compare(this.repo, p).then((t) => {
       if (this.pending !== key) return;
+      const t0 = performance.now();
       const id = col(t, "path_id");
       const la = col(t, "lines_a");
       const lb = col(t, "lines_b");
@@ -69,6 +99,14 @@ export class CompareCache {
       this.data = { key, a, b, linesA, linesB, treeA, treeB };
       this.pending = "";
       this.listeners.forEach((f) => f());
-    }).catch(console.error);
+      requestAnimationFrame(() => setTimeout(() => (this.showMs = performance.now() - t0)));
+      this.load();
+    }).catch((e) => {
+      console.error(e);
+      if (this.pending !== key) return;
+      this.pending = "";
+      const c = this.store.get().compare;
+      if (c && compareParams(this.store.get(), c).toString() !== key) this.load();
+    });
   }
 }

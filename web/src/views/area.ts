@@ -431,12 +431,14 @@ export class AreaView extends View {
 
   protected onPointerMove(x: number, _y: number, e: PointerEvent) {
     const d = this.data;
-    if (!d || this.strip.drag) return;
+    if (this.strip.dragging) return;
+    const onMarker = this.strip.hoverMarker(x, e, this.canvas);
+    if (!d) return;
     const w = (d.hi - d.lo) / d.bins;
     const bin = Math.floor((this.strip.ux(x) - d.lo) / w);
-    if (bin < d.firstBin || bin > d.lastBin || x < this.strip.m.left || x > this.strip.m.left + this.strip.plotW) {
+    if (onMarker || bin < d.firstBin || bin > d.lastBin || x < this.strip.m.left || x > this.strip.m.left + this.strip.plotW) {
       this.hoverBin = -1;
-      tooltip.hide();
+      if (!onMarker) tooltip.hide();
       this.invalidate();
       return;
     }
