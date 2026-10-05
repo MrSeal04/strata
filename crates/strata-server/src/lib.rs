@@ -30,9 +30,12 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::jobs::{JobState, Jobs};
 
+/// The web UI. Release builds leave out the sourcemaps (3.1 of `web/dist`'s 3.7 MB); debug builds
+/// read `web/dist` from disk, maps included.
 #[derive(RustEmbed)]
 #[folder = "../../web/dist"]
 #[allow_missing = true]
+#[cfg_attr(not(debug_assertions), exclude = "*.map")]
 struct Assets;
 
 pub struct AppState {
