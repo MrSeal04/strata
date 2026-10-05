@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -144,6 +144,21 @@ async fn ping() -> Json<Value> {
 /// Note every API request: open pages keep `exit_when_idle` from stopping the server.
 async fn touch(State(st): State<Shared>, req: Request, next: Next) -> Response {
     *st.last_seen.lock().unwrap() = Instant::now();
+    next.run(req).await
+}
+
+/// Local requests go uncompressed: over loopback gzip costs far more than it saves (on Linux it
+/// turned a cached 5 ms `/paths`, 10.7 MB, into 345 ms, and a cached `/state` from 3.5 ms into
+/// 255 ms). Dropping `Accept-Encoding` makes `CompressionLayer` pass them through; requests from
+/// other hosts (`--host`) are still compressed.
+async fn no_compression_locally(mut req: Request, next: Next) -> Response {
+    let local = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|ConnectInfo(peer)| peer.ip().to_canonical().is_loopback());
+    if local {
+        req.headers_mut().remove(header::ACCEPT_ENCODING);
+    }
     next.run(req).await
 }
 
@@ -657,6 +672,7 @@ pub fn router(state: Shared) -> Router {
         .fallback(static_asset)
         .layer(tower_http::compression::CompressionLayer::new())
         .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(middleware::from_fn(no_compression_locally))
         .with_state(state)
 }
 
@@ -697,6 +713,8 @@ pub async fn bind(
             Ok(listener) => {
                 let addr = listener.local_addr()?;
                 let app = router(state.clone());
+                // (the peer address tells `no_compression_locally` which requests are local)
+                let app = app.into_make_service_with_connect_info::<SocketAddr>();
                 let fut = axum::serve(listener, app).with_graceful_shutdown(async move {
                     tokio::select! {
                         _ = tokio::signal::ctrl_c() => {}
