@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { bucketLabel, bucketOfLabel, bucketOfMonth, dirKey, monthIndex } from "../src/model/slices";
+import type { App } from "../src/app";
+import { bucketLabel, bucketOfLabel, bucketOfMonth, dirKey, dirKeyOf, monthIndex } from "../src/model/slices";
+import { Store, initialState } from "../src/state/store";
 
 describe("directory keys", () => {
   // Same rule as the /area SQL: the first `depth` folders, else the file's own folder, else "(files)".
@@ -10,6 +12,17 @@ describe("directory keys", () => {
     expect(dirKey("README.md", "", 1)).toBe("(files)");
     expect(dirKey("src/views/tree.ts", "src", 1)).toBe("views");
     expect(dirKey("src/main.ts", "src", 1)).toBe("(files)");
+  });
+
+  it("are cached per repo, not only per root and depth", () => {
+    const store = new Store(initialState());
+    const app = (path: string[]) => ({ store, paths: { path } }) as unknown as App;
+    const a = app(["src/a.rs"]);
+    const b = app(["docs/b.md"]);
+    expect(dirKeyOf(a, 0)).toBe("src");
+    // Another dashboard, same root and depth: path 0 is another file there.
+    expect(dirKeyOf(b, 0)).toBe("docs");
+    expect(dirKeyOf(a, 0)).toBe("src");
   });
 });
 

@@ -64,15 +64,15 @@ export function dirKey(path: string, root: string, depth: number): string {
   return parts.slice(0, -1).join("/") || "(files)";
 }
 
-/** Directory key per path id, rebuilt when the root or depth changes (a frame asks per file, so
- *  the cache key is rebuilt only when the store's state object changes). */
-let dirKeys: { state: unknown; key: string; keys: (string | undefined)[] } = { state: null, key: "", keys: [] };
+/** Directory key per path id, rebuilt when the repo (its `Paths`), root or depth changes (a frame
+ *  asks per file, so the cache key is rebuilt only when the store's state object changes). */
+let dirKeys: { paths: unknown; state: unknown; key: string; keys: (string | undefined)[] } = { paths: null, state: null, key: "", keys: [] };
 
 export function dirKeyOf(app: App, pathId: number): string {
   const s = app.store.get();
-  if (dirKeys.state !== s) {
+  if (dirKeys.state !== s || dirKeys.paths !== app.paths) {
     const key = `${s.root}|${s.settings.areaDepth}`;
-    if (dirKeys.key !== key) dirKeys = { state: s, key, keys: [] };
+    if (dirKeys.key !== key || dirKeys.paths !== app.paths) dirKeys = { paths: app.paths, state: s, key, keys: [] };
     else dirKeys.state = s;
   }
   let k = dirKeys.keys[pathId];
@@ -101,14 +101,15 @@ export function assignDirColors(app: App, node: TNode) {
 }
 
 /** Language color per path id, rebuilt when the palette changes (a 100k-file frame asks a lot). */
-let langCache: { pal: unknown; version: number; colors: string[] } = { pal: null, version: -1, colors: [] };
+let langCache: { paths: unknown; pal: unknown; version: number; colors: string[] } = { paths: null, pal: null, version: -1, colors: [] };
 
 function langColor(app: App, pathId: number): string {
   const pal = palette();
-  // (the version changes when a dashboard assigns its languages' slots)
-  if (langCache.pal !== pal || langCache.version !== colorMaps.lang.version || langCache.colors.length !== app.paths.lang.length) {
+  // (per repo, and the version changes when a dashboard assigns its languages' slots)
+  if (langCache.paths !== app.paths || langCache.pal !== pal || langCache.version !== colorMaps.lang.version) {
     const byLang = new Map<string, string>();
     langCache = {
+      paths: app.paths,
       pal,
       version: colorMaps.lang.version,
       colors: app.paths.lang.map((l) => {
@@ -126,13 +127,13 @@ function langColor(app: App, pathId: number): string {
 }
 
 /** Directory color per path id, rebuilt when the key space, slots or palette change. */
-let dirCache: { state: unknown; version: number; key: string; colors: (string | undefined)[] } = { state: null, version: -1, key: "", colors: [] };
+let dirCache: { paths: unknown; state: unknown; version: number; key: string; colors: (string | undefined)[] } = { paths: null, state: null, version: -1, key: "", colors: [] };
 
 function dirColor(app: App, pathId: number): string {
   const s = app.store.get();
-  if (dirCache.state !== s || dirCache.version !== colorMaps.dir.version) {
+  if (dirCache.state !== s || dirCache.version !== colorMaps.dir.version || dirCache.paths !== app.paths) {
     const key = `${s.root}|${s.settings.areaDepth}|${colorMaps.dir.version}|${s.settings.theme}|${s.settings.diffColors}`;
-    if (dirCache.key !== key) dirCache = { state: s, version: colorMaps.dir.version, key, colors: [] };
+    if (dirCache.key !== key || dirCache.paths !== app.paths) dirCache = { paths: app.paths, state: s, version: colorMaps.dir.version, key, colors: [] };
     else {
       dirCache.state = s;
       dirCache.version = colorMaps.dir.version;
