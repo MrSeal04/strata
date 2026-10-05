@@ -18,6 +18,7 @@ import { TreemapView } from "../views/treemap";
 import type { View } from "../views/view";
 import { h } from "./dom";
 import { FilterBar } from "./filterbar";
+import { HistoryPanel } from "./history";
 import { openCommit, openSettings } from "./panels";
 import { Transport } from "./transport";
 
@@ -99,7 +100,8 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
       store.setSettings({ theme: dark ? "light" : "dark" });
     },
   });
-  const frame = h("div", { class: "frame" }, bar.el, grid, transport.el);
+  const history = new HistoryPanel(app);
+  const frame = h("div", { class: "frame" }, bar.el, h("div", { class: "middle" }, grid, history.el), transport.el);
   root.replaceChildren(frame);
 
   const all: View[] = Object.values(views);
@@ -122,6 +124,8 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
     store.watch((s) => s.cursor, (c) => void sync.goto(c)),
     store.watch((s) => s.settings, (s) => saveSettings(repo, s)),
     store.watch((s) => [s.settings.theme, s.settings.diffColors], () => applyTheme(store.get().settings.theme, store.get().settings.diffColors)),
+    // (commit details open beside the history rather than over it)
+    store.watch((s) => s.history, (on) => document.body.classList.toggle("history-open", on), true),
     onPaletteChange(() => all.forEach((v) => v.invalidate())),
   ];
   void sync.goto(store.get().cursor);
@@ -161,6 +165,8 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
       player.pause();
       unsubs.forEach((u) => u());
       document.removeEventListener("keydown", onKey);
+      document.body.classList.remove("history-open");
+      history.destroy();
       all.forEach((v) => v.destroy());
     },
   };

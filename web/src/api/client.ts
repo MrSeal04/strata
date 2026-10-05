@@ -171,6 +171,13 @@ export const api = {
   /** Just the commit row of a step, without its message (cheap enough to ask while playing). */
   stepBrief: (repo: string, n: number) => json<{ commit: StepBrief | null }>(`${base(repo)}/step/${n}?brief=1`),
   commits: (repo: string, p: URLSearchParams) => json<CommitRow[]>(`${base(repo)}/commits?${p}`),
+  /** The branch's steps under the filters, oldest first (column `step`). */
+  history: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/history?${p}`, signal),
+  /** History rows for the steps in `p.steps` (at most 500), newest first. */
+  historyRows: (repo: string, p: URLSearchParams) => json<HistoryRow[]>(`${base(repo)}/history/rows?${p}`),
+  /** The side commits a merge brought in, newest first. */
+  side: (repo: string, step: number, limit: number) =>
+    json<{ total: number; commits: SideCommit[] }>(`${base(repo)}/side/${step}?limit=${limit}`),
   search: (repo: string, q: string, kind: string) =>
     json<{ steps: number[]; paths: number[] }>(`${base(repo)}/search?${new URLSearchParams({ q, kind })}`),
   dirs: (repo: string, p: URLSearchParams) => json<{ name: string; is_dir: boolean; lines: number; files: number }[]>(`${base(repo)}/dirs?${p}`),
@@ -185,6 +192,30 @@ export interface CommitRow {
   dels: number;
   is_merge: boolean;
   side_count: number;
+}
+
+export interface HistoryRow {
+  step: number;
+  sha: string;
+  summary: string;
+  author: string | null;
+  author_id: number | null;
+  author_time: number;
+  time: number;
+  /** Lines under the filters. */
+  adds: number;
+  dels: number;
+  is_merge: boolean;
+  side_count: number;
+  flags: number;
+}
+
+export interface SideCommit {
+  sha: string;
+  summary: string;
+  author: string | null;
+  author_id: number | null;
+  author_time: number;
 }
 
 /** `/step/{n}?brief=1`. */

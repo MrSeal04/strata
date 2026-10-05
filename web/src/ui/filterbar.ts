@@ -17,6 +17,7 @@ export class FilterBar {
   private searchInput: HTMLInputElement;
   private searchKind: HTMLSelectElement;
   private searchInfo: HTMLElement;
+  private historyBtn: HTMLButtonElement;
   private compareBtn: HTMLButtonElement;
   private abEl: HTMLElement;
   private abInputs: { a: HTMLInputElement; b: HTMLInputElement };
@@ -59,6 +60,8 @@ export class FilterBar {
     });
     this.brushBtn = h("button", { class: "btn", title: "Clear the selected range (double-click a chart)" });
     this.brushBtn.addEventListener("click", () => store.set({ brush: null }));
+    this.historyBtn = h("button", { class: "btn", title: "The branch's commits, newest first; merges open to the commits they brought in", "aria-pressed": "false" }, icon("history"), "History");
+    this.historyBtn.addEventListener("click", () => store.set({ history: !store.get().history }));
     this.compareBtn = h("button", { class: "btn", title: "Compare two points: the selected range's ends, or start vs. now" }, icon("compare"), "Compare");
     this.compareBtn.addEventListener("click", () => this.toggleCompare());
     // A and B as commit numbers (1-based); the markers in the timeline drag them too.
@@ -89,9 +92,9 @@ export class FilterBar {
     this.el = h("header", { class: "filterbar" },
       home, name, this.crumbs, h("span", { class: "sep" }), this.chips, this.langBtn, this.authorBtn, this.botsBtn, this.wsBtn,
       h("span", { class: "sep" }), this.searchKind, this.searchInput, this.searchInfo,
-      h("span", { class: "grow" }), this.brushBtn, this.compareBtn, this.abEl, this.summaryBtn, exportBtn, settingsBtn, themeBtn,
+      h("span", { class: "grow" }), this.brushBtn, this.historyBtn, this.compareBtn, this.abEl, this.summaryBtn, exportBtn, settingsBtn, themeBtn,
     );
-    store.watch((s) => [s.root, s.langs, s.authors, s.settings.exclude, s.settings.hideBots, s.settings.ws, s.brush, s.compare, s.search?.steps.length], () => this.render(), true);
+    store.watch((s) => [s.root, s.langs, s.authors, s.settings.exclude, s.settings.hideBots, s.settings.ws, s.brush, s.compare, s.history, s.search?.steps.length], () => this.render(), true);
   }
 
   private render() {
@@ -122,6 +125,8 @@ export class FilterBar {
     this.wsBtn.classList.toggle("on", s.settings.ws);
     this.brushBtn.style.display = s.brush ? "" : "none";
     if (s.brush) this.brushBtn.textContent = `Range #${fmt.int(s.brush[0] + 1)}–#${fmt.int(s.brush[1] + 1)} ✕`;
+    this.historyBtn.classList.toggle("on", s.history);
+    this.historyBtn.setAttribute("aria-pressed", String(s.history));
     this.compareBtn.classList.toggle("on", !!s.compare);
     this.abEl.style.display = s.compare ? "" : "none";
     if (s.compare) {

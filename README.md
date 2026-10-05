@@ -20,8 +20,9 @@ the history back in a browser dashboard with four linked views:
 
 One timeline drives all four views. You can play it back (fixed length, commits per second, or
 days per second), scrub, brush a range, search, filter by category, language or author, compare
-two points (drag their A and B markers along any timeline, or type commit numbers), and export
-PNG, SVG, MP4 or GIF.
+two points (drag their A and B markers along any timeline, or type commit numbers), browse the
+branch history beside the charts (click a commit to go there; open a merge to see the commits it
+brought in), and export PNG, SVG, MP4 or GIF.
 
 ![The strata dashboard on the Linux kernel at v7.3-rc1, dark theme](docs/dashboard.png)
 
@@ -77,7 +78,7 @@ turns on verbose logs.
 
 - **Timeline**: the first-parent chain of the branch. Each merge is one step, so totals never
   double-count. Commits a merge brings in are recorded as its *side commits*, which feed the
-  hover cards, search and tag placement.
+  hover cards, search, tag placement and the history panel.
 - **Diffs**: gitoxide tree diffs with rename tracking, and histogram line diffs for every
   changed blob. Each change is counted twice, strict and whitespace-insensitive, so "ignore
   whitespace" is a query-time toggle. Per-step counts match

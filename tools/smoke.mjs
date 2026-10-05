@@ -2,8 +2,8 @@
 // Smoke test: extract a fixture into a temporary cache, serve it, open the home page and the
 // dashboard at desktop and phone widths, exercise every view mode, playback and zoom, the card
 // header options and unlinked cards, check that phones scroll the page until a card is zoomed,
-// drag the compare markers, update and then delete the repo from its home card, and fail on any
-// page, console or HTTP error.
+// drag the compare markers, use the branch history, update and then delete the repo from its
+// home card, and fail on any page, console or HTTP error.
 // Usage: node tools/smoke.mjs [strata-binary] [out-dir]
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync } from "node:fs";
@@ -236,6 +236,65 @@ try {
     if (summaryInputs) failures.push("compare: the Summary panel should no longer hold A/B fields");
     await page.screenshot({ path: join(out, "compare.png") });
     await page.close();
+  }
+  // History: the branch's commits beside Compare. Clicking one moves the cursor, a merge opens to
+  // the commits it brought in, and a folder filter keeps the commits touching it (git log -- dir).
+  {
+    const kitchen = join(home, "fixtures/kitchen");
+    const fp = execFileSync("git", ["-C", kitchen, "log", "--first-parent", "--reverse", "--format=%H"], { encoding: "utf8" }).trim().split("\n");
+    const touching = execFileSync("git", ["-C", kitchen, "log", "--first-parent", "--format=%H", "--", "tool"], { encoding: "utf8" }).trim().split("\n");
+    const wantTool = touching.map((sha) => String(fp.indexOf(sha)));
+    for (const [w, hgt] of [[1440, 900], [420, 900]]) {
+      const tag = `history-${w}`;
+      const page = await browser.newPage();
+      page.on("pageerror", (e) => failures.push(`${tag}: page error: ${e.message}`));
+      page.on("console", (m) => m.type() === "error" && failures.push(`${tag}: console: ${m.text()}`));
+      page.on("response", (r) => r.status() >= 400 && failures.push(`${tag}: HTTP ${r.status()} ${r.url()}`));
+      await page.setViewport({ width: w, height: hgt });
+      await page.goto(`http://127.0.0.1:${port}/#/r/${id}`, { waitUntil: "networkidle0" });
+      await new Promise((r) => setTimeout(r, 1500));
+      const r = await page.evaluate(async () => {
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const a = window.strata.app;
+        const rows = (kind) => [...document.querySelectorAll(".history .hrow")].filter((r) => r.dataset.kind === kind);
+        [...document.querySelectorAll(".filterbar button")].find((b) => b.textContent === "History").click();
+        await sleep(1000);
+        const out = { steps: a.store.get().steps, open: !document.querySelector(".history").hidden, main: rows("main").map((r) => r.dataset.step) };
+        out.cur = document.querySelector(".history .hrow.cur")?.dataset.step;
+        const oldest = rows("main").pop();
+        oldest.click();
+        await sleep(400);
+        out.cursor = a.store.get().cursor;
+        out.future = document.querySelectorAll(".history .hrow.future").length;
+        const expand = document.querySelector(".history [data-expand]");
+        const merge = expand.dataset.expand;
+        out.sideCount = Number(expand.textContent.match(/\d+/)[0]);
+        expand.click();
+        await sleep(600);
+        out.side = rows("side").filter((r) => r.dataset.step === merge).length;
+        a.store.set({ root: "tool" });
+        await sleep(1000);
+        out.tool = rows("main").map((r) => r.dataset.step);
+        out.info = document.querySelector(".history .info").textContent;
+        a.store.set({ root: "" });
+        await sleep(600);
+        out.back = rows("main").length;
+        document.querySelector(".history .hhead [aria-label='Close history']").click();
+        await sleep(200);
+        out.closed = document.querySelector(".history").hidden && !a.store.get().history;
+        return out;
+      });
+      const all = Array.from({ length: r.steps }, (_, i) => String(r.steps - 1 - i));
+      if (!r.open || r.main.join() !== all.join()) failures.push(`${tag}: History should list every commit, newest first (${JSON.stringify(r)})`);
+      if (r.cur !== String(r.steps - 1)) failures.push(`${tag}: the cursor's commit should be marked (${JSON.stringify(r)})`);
+      if (r.cursor !== 0 || r.future !== r.steps - 1) failures.push(`${tag}: clicking the oldest commit should move the cursor there and dim the rest (${JSON.stringify(r)})`);
+      if (!(r.sideCount > 0) || r.side !== r.sideCount) failures.push(`${tag}: an expanded merge should list the commits it brought in (${JSON.stringify(r)})`);
+      if (r.tool.join() !== wantTool.join() || !r.info.includes(`of ${r.steps}`)) failures.push(`${tag}: a folder filter should keep the commits touching it, ${wantTool} (${JSON.stringify(r)})`);
+      if (r.back !== r.steps) failures.push(`${tag}: clearing the filter should bring every commit back (${JSON.stringify(r)})`);
+      if (!r.closed) failures.push(`${tag}: Close should hide the history`);
+      await page.screenshot({ path: join(out, `${tag}.png`) });
+      await page.close();
+    }
   }
   // Last, since everything above reads kitchen: update it from its home card, then delete it.
   {

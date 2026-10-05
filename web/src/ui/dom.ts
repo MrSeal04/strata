@@ -40,6 +40,9 @@ const ICONS: Record<string, string> = {
   moon: "M13 9.5A5.5 5.5 0 0 1 6.5 3 5.5 5.5 0 1 0 13 9.5z",
   table: "M2 3h12v10H2zM2 6.5h12M2 10h12M6 3v10",
   compare: "M3 3h4v10H3zM9 6h4v7H9z",
+  history: "M5 2v12M12.5 5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zM11 6.5c0 3-6 2.5-6 5",
+  target: "M8 2v2.5M8 11.5V14M2 8h2.5M11.5 8H14M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
+  info: "M8 14.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM8 7.5v4M8 5v.01",
   back: "M10 3L5 8l5 5",
   fit: "M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4",
 };

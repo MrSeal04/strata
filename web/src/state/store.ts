@@ -121,6 +121,8 @@ export interface State {
   langs: string[];
   authors: number[];
   compare: Compare | null;
+  /** The branch history sidebar is open. */
+  history: boolean;
   search: SearchState | null;
   settings: Settings;
   /** Monotonic counter bumped when filters change (views refetch). */
@@ -195,6 +197,7 @@ export function initialState(): State {
     langs: [],
     authors: [],
     compare: null,
+    history: false,
     search: null,
     settings: { ...DEFAULT_SETTINGS },
     filterRev: 0,
