@@ -1,5 +1,10 @@
 # strata
 
+[![CI](https://github.com/MrSeal04/strata/actions/workflows/ci.yml/badge.svg)](https://github.com/MrSeal04/strata/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/MrSeal04/strata)](https://github.com/MrSeal04/strata/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/MrSeal04/strata)](LICENSE)
+![Platform: Linux x86-64](https://img.shields.io/badge/platform-Linux%20x86--64-informational)
+
 See how a git repository grew. `strata` reads a repo's history, measures every commit's
 additions and deletions, tracks which commit (and author) wrote every surviving line, and plays
 the history back in a browser dashboard with four linked views:
@@ -24,10 +29,12 @@ two points (drag their A and B markers along any timeline, or type commit number
 branch history beside the charts (click a commit to go there; open a merge to see the commits it
 brought in), and export PNG, SVG, MP4 or GIF.
 
-![The strata dashboard on the Linux kernel at v7.3-rc1, dark theme](docs/dashboard.png)
+![The strata dashboard on the Linux kernel at v7.3-rc1, dark theme, with the History panel open](docs/dashboard.png)
 
 *The Linux kernel at v7.3-rc1 (77,000 first-parent commits): files colored by how long ago their content
-was last edited, yellow for the merge window just closed through deep red for code untouched for years.*
+was last edited, yellow for the merge window just closed through deep red for code untouched for years.
+The History panel on the right lists the branch's commits around the cursor; each merge opens to the commits it
+brought in.*
 
 ## Quick start
 
