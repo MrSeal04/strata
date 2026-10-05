@@ -168,6 +168,8 @@ export const api = {
   /** `composition` rows per step over (from, to], for playback. */
   origins: (repo: string, p: URLSearchParams, signal?: AbortSignal) => arrow(`${base(repo)}/origins?${p}`, signal),
   step: (repo: string, n: number) => json<StepDetail>(`${base(repo)}/step/${n}`),
+  /** Just the commit row of a step, without its message (cheap enough to ask while playing). */
+  stepBrief: (repo: string, n: number) => json<{ commit: StepBrief | null }>(`${base(repo)}/step/${n}?brief=1`),
   commits: (repo: string, p: URLSearchParams) => json<CommitRow[]>(`${base(repo)}/commits?${p}`),
   search: (repo: string, q: string, kind: string) =>
     json<{ steps: number[]; paths: number[] }>(`${base(repo)}/search?${new URLSearchParams({ q, kind })}`),
@@ -184,6 +186,9 @@ export interface CommitRow {
   is_merge: boolean;
   side_count: number;
 }
+
+/** `/step/{n}?brief=1`. */
+export type StepBrief = Omit<NonNullable<StepDetail["commit"]>, "message" | "commit_time" | "author_email" | "committer">;
 
 export interface StepDetail {
   commit: {

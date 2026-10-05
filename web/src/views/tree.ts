@@ -1,7 +1,7 @@
 import { type HierarchyNode, type HierarchyRectangularNode, hierarchy, partition, tree as d3tree } from "d3";
 import type { App } from "../app";
 import { colorMaps } from "../model/colors";
-import { TNode, stableChildren } from "../model/filetree";
+import { TNode, largestFile as largestFileBelow, stableChildren } from "../model/filetree";
 import { assignDirColors, fileColor, heat, heatSpan } from "../model/slices";
 import { CanvasPainter } from "../paint/canvas";
 import type { Painter } from "../paint/painter";
@@ -57,24 +57,14 @@ interface Beam {
   del: boolean;
 }
 
-/** The largest file below a visible node (the color of a collapsed folder). */
+/** The largest file below a visible node (the color of a collapsed folder). A real folder's
+ *  visible nodes cover its whole subtree; a synthetic group of loose files covers its files. */
 function largestFile(v: VNode): TNode | null {
+  if (!v.synthetic) return largestFileBelow(v.t);
   let rep: TNode | null = null;
-  const stack = [...v.children];
-  while (stack.length) {
-    const c = stack.pop()!;
-    if (c.t.file && (!rep || c.t.file.lines > rep.file!.lines)) rep = c.t;
-    if (c.rep?.file && (!rep || c.rep.file.lines > rep.file!.lines)) rep = c.rep;
-    stack.push(...c.children);
-  }
-  if (!rep) {
-    // collapsed without visible children: search the real subtree
-    const walk = [v.t];
-    while (walk.length) {
-      const t = walk.pop()!;
-      if (t.file && (!rep || t.file.lines > rep.file!.lines)) rep = t;
-      if (t.children) walk.push(...t.children.values());
-    }
+  for (const c of v.children) {
+    const l = largestFileBelow(c.t);
+    if (l && (!rep || l.file!.lines > rep.file!.lines)) rep = l;
   }
   return rep;
 }

@@ -1,7 +1,7 @@
 import { tableFromArrays } from "apache-arrow";
 import { describe, expect, it } from "vitest";
 import { Categorical } from "../src/model/colors";
-import { type DecodedEvents, FileTree, Paths, stableChildren } from "../src/model/filetree";
+import { type DecodedEvents, FileTree, Paths, largestFile, stableChildren } from "../src/model/filetree";
 
 function paths(list: [number, string, number][]) {
   return new Paths(
@@ -76,6 +76,45 @@ describe("FileTree", () => {
     t.set(rec(3, 1000));
     expect(stableChildren(t.find("src")!).map((n) => n.name)).toEqual(before);
     expect(before).toEqual(["a.rs", "c.rs"]);
+  });
+
+  it("keeps each folder's largest file as files grow, shrink, come and go", () => {
+    const t = new FileTree(P);
+    const largest = (dir: string) => largestFile(t.find(dir)!)?.name ?? null;
+    t.set(rec(0, 5));
+    t.set(rec(1, 3));
+    expect(largest("src")).toBe("a.rs");
+    expect(largest("src/deep")).toBe("b.rs");
+    t.set(rec(1, 9)); // grows past a.rs
+    expect(largest("src")).toBe("b.rs");
+    expect(largest("")).toBe("b.rs");
+    t.set(rec(1, 1)); // shrinks below it
+    expect(largest("src")).toBe("a.rs");
+    t.set(rec(3, 7)); // a new file
+    expect(largest("src")).toBe("c.rs");
+    t.remove(3);
+    expect(largest("src")).toBe("a.rs");
+    t.remove(0);
+    expect(largest("src")).toBe("b.rs");
+  });
+
+  it("re-sorts cached children when files come and go or a folder's place changes", () => {
+    const t = new FileTree(P);
+    t.set(rec(3, 1));
+    t.set(rec(2, 1));
+    const src = () => stableChildren(t.find("src")!).map((n) => n.name);
+    const root = () => stableChildren(t.root).map((n) => n.name);
+    expect(src()).toEqual(["c.rs"]);
+    expect(root()).toEqual(["README.md", "src"]);
+    // An older file arrives: src takes its place, ahead of README.md.
+    t.set(rec(0, 1));
+    expect(src()).toEqual(["a.rs", "c.rs"]);
+    expect(root()).toEqual(["src", "README.md"]);
+    t.remove(0);
+    expect(src()).toEqual(["c.rs"]);
+    // (the steady layout reassigns folder places directly)
+    t.find("src")!.order = 9;
+    expect(root()).toEqual(["README.md", "src"]);
   });
 });
 

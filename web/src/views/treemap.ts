@@ -289,13 +289,17 @@ export class TreemapView extends View {
     this.cullKey = this.viewKey();
   }
 
-  /** Summed bands of every file under a folder, cached per composition revision. */
+  /** Summed bands of every file under a folder, per painted band revision (`bandsRev`, which
+   *  follows the composition a few times a second while playing: summing every folder's files
+   *  on each frame took ~5 ms a frame on Linux). */
   private lodPairs = new WeakMap<TNode, { rev: number; pairs: number[] }>();
+  /** Scratch: one file's band values by key index + 1 (see `draw`). */
+  private bandVals = new Float64Array(0);
 
   private subtreePairs(n: LNode): number[] | undefined {
     const comp = this.app.composition;
     const hit = this.lodPairs.get(n.data);
-    if (hit?.rev === comp.rev) return hit.pairs;
+    if (hit?.rev === this.bandsRev) return hit.pairs.length ? hit.pairs : undefined;
     const sum = new Map<number, number>();
     for (const l of n.leaves()) {
       const a = l.data.file ? comp.of(l.data.file.pathId) : undefined;
@@ -303,7 +307,7 @@ export class TreemapView extends View {
     }
     const pairs: number[] = [];
     for (const [k, v] of sum) pairs.push(k, v);
-    this.lodPairs.set(n.data, { rev: comp.rev, pairs });
+    this.lodPairs.set(n.data, { rev: this.bandsRev, pairs });
     return pairs.length ? pairs : undefined;
   }
 
@@ -415,6 +419,17 @@ export class TreemapView extends View {
     dirs = [];
     groups = new Map();
     labels = [];
+    const put = (c: string, alpha: number, x: number, y: number, bw: number, bh: number) => {
+      const gk = alpha === 1 ? c : `${c}|${alpha}`;
+      let g = groups.get(gk);
+      if (!g) {
+        g = { fill: c, alpha, xywh: [] };
+        groups.set(gk, g);
+      }
+      g.xywh.push(x, y, bw, bh);
+    };
+    if (bandsOn && this.bandVals.length < comp.keys.length + 1) this.bandVals = new Float64Array(comp.keys.length + 1);
+    const vals = this.bandVals;
     for (const pane of this.panes) {
       if (pane.label) labels.push([pane.label, pane.x + 4, 11, pane.w - 8, pal.ink2, true]);
       for (const n of pane.nodes) {
@@ -453,17 +468,9 @@ export class TreemapView extends View {
         }
         const leaf = rep ?? n.data;
         const f = leaf.file!;
-        const fill = comparing ? growthColor(this.app, f.pathId) : fileColor(this.app, leaf, colorBy, pos);
+        // (the file's one color, computed only where it's drawn: band strips don't use it)
+        let fill = "";
         const alpha = searchPaths && !searchPaths.has(f.pathId) ? 0.2 : 1;
-        const put = (c: string, x: number, y: number, bw: number, bh: number) => {
-          const gk = alpha === 1 ? c : `${c}|${alpha}`;
-          let g = groups.get(gk);
-          if (!g) {
-            g = { fill: c, alpha, xywh: [] };
-            groups.set(gk, g);
-          }
-          g.xywh.push(x, y, bw, bh);
-        };
         // A folder drawn as one rect takes its whole subtree's bands (not its largest file's),
         // so small files' minority authors still count.
         const pairs = !bandsOn ? undefined : rep ? this.subtreePairs(n) : comp.of(f.pathId);
@@ -471,7 +478,7 @@ export class TreemapView extends View {
           // Too small to split: the key with the most lines.
           let best = 0;
           for (let j = 2; j < pairs.length; j += 2) if (pairs[j + 1] > pairs[best + 1]) best = j;
-          put(comp.color(pairs[best]), X, Y, w, hh);
+          put(comp.color(pairs[best]), alpha, X, Y, w, hh);
         } else if (pairs && pairs.length > 2) {
           // Strips along the longer side, in band order (authors by rank, cohorts oldest first).
           let total = 0;
@@ -479,19 +486,22 @@ export class TreemapView extends View {
           const across = w >= hh;
           const len = across ? w : hh;
           let acc = 0;
+          // (keys are -1..keys.length-1, so they index `vals` + 1)
+          for (let j = 0; j < pairs.length; j += 2) vals[pairs[j] + 1] = pairs[j + 1];
           for (const k of comp.order) {
-            let v = 0;
-            for (let j = 0; j < pairs.length; j += 2) if (pairs[j] === k) v = pairs[j + 1];
+            const v = vals[k + 1];
             if (!v) continue;
             const a0 = (acc / total) * len;
             acc += v;
             const a1 = (acc / total) * len;
             if (a1 - a0 < 0.3) continue;
-            if (across) put(comp.color(k), X + a0, Y, a1 - a0, hh);
-            else put(comp.color(k), X, Y + a0, w, a1 - a0);
+            if (across) put(comp.color(k), alpha, X + a0, Y, a1 - a0, hh);
+            else put(comp.color(k), alpha, X, Y + a0, w, a1 - a0);
           }
+          for (let j = 0; j < pairs.length; j += 2) vals[pairs[j] + 1] = 0;
         } else {
-          put(fill, X, Y, w, hh);
+          fill = comparing ? growthColor(this.app, f.pathId) : fileColor(this.app, leaf, colorBy, pos);
+          put(fill, alpha, X, Y, w, hh);
         }
         // Activity cue in every mode: a brief ring on files touched right now.
         if (!comparing && !rep && f.touched >= 0 && pos - f.touched < 400) {
@@ -499,7 +509,10 @@ export class TreemapView extends View {
           if (ringsOn && ht > 0.15 && w > 2 && hh > 2) rings.push([X + 0.75, Y + 0.75, w - 1.5, hh - 1.5, f.lastDels > f.lastAdds ? pal.del : pal.add, ht]);
           if (ht > 0.05) moving ||= s.playing;
         }
-        if (!rep && w > 46 && hh > 16) labels.push([n.data.name, Math.max(X, 0) + 4, Math.max(Y, 0) + 11, Math.min(w, X + w) - 8, inkOn(fill), false]);
+        if (!rep && w > 46 && hh > 16) {
+          fill ||= comparing ? growthColor(this.app, f.pathId) : fileColor(this.app, leaf, colorBy, pos);
+          labels.push([n.data.name, Math.max(X, 0) + 4, Math.max(Y, 0) + 11, Math.min(w, X + w) - 8, inkOn(fill), false]);
+        }
       }
     }
     this.frame = { key: colorKey, dirs, groups, labels };

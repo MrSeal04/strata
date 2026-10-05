@@ -3,7 +3,6 @@
 
 import { interpolateYlOrRd } from "d3";
 import type { App } from "../app";
-import { clock } from "../clock";
 import type { ColorBy } from "../state/store";
 import { palette } from "../theme";
 import { colorMaps, diverging, mix, sequential } from "./colors";
@@ -65,13 +64,17 @@ export function dirKey(path: string, root: string, depth: number): string {
   return parts.slice(0, -1).join("/") || "(files)";
 }
 
-/** Directory key per path id, rebuilt when the root or depth changes (a frame asks per file). */
-let dirKeys: { key: string; keys: (string | undefined)[] } = { key: "", keys: [] };
+/** Directory key per path id, rebuilt when the root or depth changes (a frame asks per file, so
+ *  the cache key is rebuilt only when the store's state object changes). */
+let dirKeys: { state: unknown; key: string; keys: (string | undefined)[] } = { state: null, key: "", keys: [] };
 
 export function dirKeyOf(app: App, pathId: number): string {
   const s = app.store.get();
-  const key = `${s.root}|${s.settings.areaDepth}`;
-  if (dirKeys.key !== key) dirKeys = { key, keys: [] };
+  if (dirKeys.state !== s) {
+    const key = `${s.root}|${s.settings.areaDepth}`;
+    if (dirKeys.key !== key) dirKeys = { state: s, key, keys: [] };
+    else dirKeys.state = s;
+  }
   let k = dirKeys.keys[pathId];
   if (k === undefined) {
     k = dirKey(app.paths.path[pathId] ?? "", s.root, s.settings.areaDepth);
@@ -98,14 +101,16 @@ export function assignDirColors(app: App, node: TNode) {
 }
 
 /** Language color per path id, rebuilt when the palette changes (a 100k-file frame asks a lot). */
-let langCache: { pal: unknown; colors: string[] } = { pal: null, colors: [] };
+let langCache: { pal: unknown; version: number; colors: string[] } = { pal: null, version: -1, colors: [] };
 
 function langColor(app: App, pathId: number): string {
   const pal = palette();
-  if (langCache.pal !== pal || langCache.colors.length !== app.paths.lang.length) {
+  // (the version changes when a dashboard assigns its languages' slots)
+  if (langCache.pal !== pal || langCache.version !== colorMaps.lang.version || langCache.colors.length !== app.paths.lang.length) {
     const byLang = new Map<string, string>();
     langCache = {
       pal,
+      version: colorMaps.lang.version,
       colors: app.paths.lang.map((l) => {
         const key = l || "Other";
         let c = byLang.get(key);
@@ -121,12 +126,18 @@ function langColor(app: App, pathId: number): string {
 }
 
 /** Directory color per path id, rebuilt when the key space, slots or palette change. */
-let dirCache: { key: string; colors: (string | undefined)[] } = { key: "", colors: [] };
+let dirCache: { state: unknown; version: number; key: string; colors: (string | undefined)[] } = { state: null, version: -1, key: "", colors: [] };
 
 function dirColor(app: App, pathId: number): string {
   const s = app.store.get();
-  const key = `${s.root}|${s.settings.areaDepth}|${colorMaps.dir.version}|${s.settings.theme}|${s.settings.diffColors}`;
-  if (dirCache.key !== key) dirCache = { key, colors: [] };
+  if (dirCache.state !== s || dirCache.version !== colorMaps.dir.version) {
+    const key = `${s.root}|${s.settings.areaDepth}|${colorMaps.dir.version}|${s.settings.theme}|${s.settings.diffColors}`;
+    if (dirCache.key !== key) dirCache = { state: s, version: colorMaps.dir.version, key, colors: [] };
+    else {
+      dirCache.state = s;
+      dirCache.version = colorMaps.dir.version;
+    }
+  }
   let c = dirCache.colors[pathId];
   if (c === undefined) {
     c = colorMaps.dir.color(dirKeyOf(app, pathId));
@@ -211,15 +222,19 @@ export function growthColor(app: App, pathId: number): string {
 }
 
 /** 1 when a file was just touched, decaying to 0 over `heatSeconds` of playback. */
-let heatSteps = { key: -1, steps: 1 };
+let heatSteps: { state: unknown; rate: number | null; steps: number } = { state: null, rate: null, steps: 1 };
 
 export function heat(app: App, touched: number, pos: number): number {
   if (touched < 0) return 0;
   const age = pos - touched;
   if (age < -0.5) return 0;
-  // The decay length is the same for every file in a frame; compute it once per ~frame.
-  const key = Math.floor(clock.now() / 8);
-  if (heatSteps.key !== key) heatSteps = { key, steps: Math.max(0.5, app.store.get().settings.heatSeconds * app.stepsPerSecond()) };
+  // The decay length is the same for every file in a frame: it changes only with the store's
+  // state (a new object on every change) or the exporter's rate. (Reading the clock per file
+  // to throttle it cost more than the computation.)
+  const s = app.store.get();
+  if (heatSteps.state !== s || heatSteps.rate !== app.exportRate) {
+    heatSteps = { state: s, rate: app.exportRate, steps: Math.max(0.5, s.settings.heatSeconds * app.stepsPerSecond()) };
+  }
   return Math.exp(-Math.max(0, age) / heatSteps.steps);
 }
 

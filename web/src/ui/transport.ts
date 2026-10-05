@@ -165,7 +165,7 @@ export class Transport {
     this.summaryTimer = window.setTimeout(() => {
       this.lastSummaryAt = performance.now();
       const step = this.app.store.get().cursor;
-      api.step(this.app.repo, step).then((d) => {
+      api.stepBrief(this.app.repo, step).then((d) => {
         const now = this.app.store.get();
         // While playing, a slightly stale summary beats none; when paused, only the current one.
         if (!d.commit || (!now.playing && now.cursor !== step)) return;

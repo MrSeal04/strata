@@ -56,14 +56,31 @@ export class TNode {
   file: FileRec | null = null;
   /** The treemap's eased on-screen rect for this node (view state, kept here for speed). */
   shown: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  /** `stableChildren`'s result, dropped when a child comes or goes or a child's `order` changes:
+   *  every relayout and tree rebuild asks for every folder's children, which rarely change. */
+  sortedKids: TNode[] | null = null;
+  /** `largestFile`'s result for a folder (undefined: not known), dropped up the path whenever a
+   *  file below changes size or comes or goes. */
+  largest: TNode | null | undefined = undefined;
+  private place: number;
   constructor(
     readonly id: string,
     readonly name: string,
     readonly parent: TNode | null,
     readonly isDir: boolean,
-    public order: number,
+    order: number,
   ) {
     this.children = isDir ? new Map() : null;
+    this.place = order;
+  }
+  /** Sort key among siblings (the first step of its oldest file). */
+  get order(): number {
+    return this.place;
+  }
+  set order(v: number) {
+    if (v === this.place) return;
+    this.place = v;
+    if (this.parent) this.parent.sortedKids = null;
   }
   depth(): number {
     let d = 0;
@@ -117,6 +134,7 @@ export class FileTree {
       if (!next) {
         next = new TNode(acc, parts[i], node, true, order);
         node.children!.set(parts[i], next);
+        node.sortedKids = null;
       } else if (order < next.order) {
         // A folder's place is its oldest file's, whichever file happened to create it.
         next.order = order;
@@ -126,7 +144,11 @@ export class FileTree {
     const name = parts[parts.length - 1];
     leaf = new TNode(path, name, node, false, order);
     node.children!.set(name, leaf);
-    for (let p: TNode | null = node; p; p = p.parent) p.files++;
+    node.sortedKids = null;
+    for (let p: TNode | null = node; p; p = p.parent) {
+      p.files++;
+      p.largest = undefined;
+    }
     leaf.files = 1;
     this.leaves.set(pathId, leaf);
     this.structureRev++;
@@ -134,7 +156,10 @@ export class FileTree {
   }
 
   private addValue(node: TNode, delta: number) {
-    for (let p: TNode | null = node; p; p = p.parent) p.value += delta;
+    for (let p: TNode | null = node; p; p = p.parent) {
+      p.value += delta;
+      p.largest = undefined;
+    }
   }
 
   set(rec: FileRec) {
@@ -154,10 +179,15 @@ export class FileTree {
     this.files.delete(pathId);
     let node: TNode | null = leaf.parent;
     node?.children!.delete(leaf.name);
-    for (let p = node; p; p = p.parent) p.files--;
+    if (node) node.sortedKids = null;
+    for (let p = node; p; p = p.parent) {
+      p.files--;
+      p.largest = undefined;
+    }
     // prune empty directories
     while (node && node.parent && node.children!.size === 0) {
       node.parent.children!.delete(node.name);
+      node.parent.sortedKids = null;
       node = node.parent;
     }
     this.structureRev++;
@@ -269,8 +299,28 @@ export function decodeEvents(t: Table): DecodedEvents {
   };
 }
 
-/** Sort children stably: first appearance, then name (never by size, so layouts don't shuffle). */
+/**
+ * The file with the most lines at or below `n` (what a collapsed folder is colored like), or
+ * null. Cached per folder, so a tree rebuild walks only folders whose files changed: valid for
+ * trees changed through `FileTree.set` / `remove` (the steady layout's reference tree edits
+ * `file` directly and doesn't use this).
+ */
+export function largestFile(n: TNode): TNode | null {
+  if (!n.children) return n.file ? n : null;
+  if (n.largest !== undefined) return n.largest;
+  let best: TNode | null = null;
+  for (const c of n.children.values()) {
+    const l = largestFile(c);
+    if (l && (!best || l.file!.lines > best.file!.lines)) best = l;
+  }
+  n.largest = best;
+  return best;
+}
+
+/** Sort children stably: first appearance, then name (never by size, so layouts don't shuffle).
+ *  The array is cached on the node and shared: callers must not modify it. */
 export function stableChildren(n: TNode): TNode[] {
   if (!n.children) return [];
-  return [...n.children.values()].sort((a, b) => a.order - b.order || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  n.sortedKids ??= [...n.children.values()].sort((a, b) => a.order - b.order || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return n.sortedKids;
 }

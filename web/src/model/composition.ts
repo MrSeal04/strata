@@ -16,6 +16,19 @@ export type BandSlice = "author" | "cohort";
  */
 type Key = { key: number; label: string };
 
+/** /composition rows (a snapshot) or /origins rows (a playback chunk, with `step`), decoded once:
+ *  a chunk is applied a little every frame, so decoding it there cost ~2 ms a frame on Linux. */
+interface Rows {
+  step: Float64Array | null;
+  id: Float64Array;
+  k: Float64Array;
+  v: Float64Array;
+}
+
+function decode(t: Table, withStep: boolean): Rows {
+  return { step: withStep ? col(t, "step") : null, id: col(t, "path_id"), k: col(t, "k"), v: col(t, "v") };
+}
+
 export class Composition implements SyncLayer {
   /** Keys the loaded values refer to, best first: raw key (canonical author id or cohort
    *  bucket) and label. */
@@ -37,6 +50,9 @@ export class Composition implements SyncLayer {
   private fetching = "";
   /** path id -> [k0, v0, k1, v1, ...] */
   private values = new Map<number, number[]>();
+  /** Color per key index (index 0 is key -1), valid while every input in `colorsFor` is unchanged. */
+  private colors: string[] = [];
+  private colorsFor: unknown[] = [];
   private listeners = new Set<() => void>();
 
   constructor(private app: App) {}
@@ -127,20 +143,17 @@ export class Composition implements SyncLayer {
     return p;
   }
 
-  snapshot(step: number): Promise<Table> {
-    return api.composition(this.app.repo, this.params({ from: this.window, to: step }));
+  snapshot(step: number): Promise<Rows> {
+    return api.composition(this.app.repo, this.params({ from: this.window, to: step })).then((t) => decode(t, false));
   }
 
-  chunk(from: number, to: number): Promise<Table> {
+  chunk(from: number, to: number): Promise<Rows> {
     // (lines changed only count inside the churn window)
-    return api.origins(this.app.repo, this.params({ from: Math.max(from, this.window), to }));
+    return api.origins(this.app.repo, this.params({ from: Math.max(from, this.window), to })).then((t) => decode(t, true));
   }
 
   load(data: unknown) {
-    const t = data as Table;
-    const id = col(t, "path_id");
-    const k = col(t, "k");
-    const v = col(t, "v");
+    const { id, k, v } = data as Rows;
     this.values.clear();
     for (let i = 0; i < id.length; i++) this.add(id[i], k[i], v[i]);
     this.keys = this.next;
@@ -153,11 +166,8 @@ export class Composition implements SyncLayer {
   }
 
   apply(data: unknown, ptr: number, upto: number): number {
-    const t = data as Table;
-    const step = col(t, "step");
-    const id = col(t, "path_id");
-    const k = col(t, "k");
-    const v = col(t, "v");
+    const { step: steps, id, k, v } = data as Rows;
+    const step = steps!;
     let i = ptr;
     for (; i < step.length && step[i] <= upto; i++) this.add(id[i], k[i], v[i]);
     if (i !== ptr) this.rev++;
@@ -210,11 +220,21 @@ export class Composition implements SyncLayer {
     return k < 0 ? "(other)" : (this.keys[k]?.label ?? "(other)");
   }
 
+  /** A key's color. Views ask once per band per file every frame, so colors are kept per key. */
   color(k: number): string {
-    if (k < 0 || !this.keys[k]) return palette().other;
-    if (this.loadedSlice === "author") return colorMaps.author.color(this.keys[k].label);
-    const unit = cohortUnit(this.app);
-    const [first, last] = cohortRange(this.app, unit);
-    return cohortColor(this.keys[k].key, first, last);
+    const pal = palette();
+    const deps = [pal, this.keys, this.loadedSlice, colorMaps.author.version, this.app.store.get().settings.cohortUnit];
+    if (deps.some((d, i) => d !== this.colorsFor[i])) {
+      this.colorsFor = deps;
+      this.colors = [pal.other];
+      if (this.loadedSlice === "author") {
+        for (const key of this.keys) this.colors.push(colorMaps.author.color(key.label));
+      } else {
+        const unit = cohortUnit(this.app);
+        const [first, last] = cohortRange(this.app, unit);
+        for (const key of this.keys) this.colors.push(cohortColor(key.key, first, last));
+      }
+    }
+    return this.colors[k + 1] ?? pal.other;
   }
 }
