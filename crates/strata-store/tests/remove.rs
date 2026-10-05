@@ -206,9 +206,28 @@ fn gc_removes_interrupted_extractions_and_unused_clones() {
     std::fs::create_dir_all(&partial).unwrap();
     let mut all = vec![orphan.clone(), unused_clone.clone(), partial.clone()];
     all.sort();
-    for p in &all {
+    // A listed remote whose URL has `.git` before its last part: its clone sits inside a
+    // directory that looks like a clone itself.
+    let nested_src = Source::Url {
+        url: "https://nested.example.com/group.git/repo.git".into(),
+    };
+    let nested = RepoMeta {
+        id: nested_src.id(),
+        source: nested_src.clone(),
+        ..meta.clone()
+    };
+    layout.write_meta(&nested).unwrap();
+    let Source::Url { url: nested_url } = &nested_src else {
+        unreachable!()
+    };
+    let nested_clone = layout.clone_dir(nested_url);
+    assert!(nested_clone.ends_with("group.git/repo.git"));
+    std::fs::create_dir_all(&nested_clone).unwrap();
+    std::fs::write(nested_clone.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+    for p in all.iter().chain([&nested_clone]) {
         age(p, 2 * DAY);
     }
+    age(&layout.root.join("clones/nested.example.com"), 2 * DAY);
     let sorted = |mut v: Vec<std::path::PathBuf>| {
         v.sort();
         v
@@ -255,5 +274,9 @@ fn gc_removes_interrupted_extractions_and_unused_clones() {
     );
     assert!(layout.repo_dir(&meta.id).join("meta.json").exists());
     assert!(used_clone.join("HEAD").exists());
+    assert!(
+        nested_clone.join("HEAD").exists(),
+        "a used clone's parents stay"
+    );
     assert!(src.join(".git/HEAD").exists());
 }

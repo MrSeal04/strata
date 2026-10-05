@@ -555,7 +555,8 @@ pub fn remove_orphans(
     let mut clones = Vec::new();
     clone_dirs(&layout.root.join("clones"), &mut clones);
     for clone in clones {
-        if read.contains(&clone) || newest_mtime(&clone) > cutoff {
+        // (a used clone, or a directory holding one: a URL can have `.git` before its last part)
+        if read.iter().any(|r| r.starts_with(&clone)) || newest_mtime(&clone) > cutoff {
             continue;
         }
         if !dry_run {
