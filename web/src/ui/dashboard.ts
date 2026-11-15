@@ -101,7 +101,7 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
     },
   });
   const history = new HistoryPanel(app);
-  const frame = h("div", { class: "frame" }, bar.el, h("div", { class: "middle" }, grid, history.el), transport.el);
+  const frame = h("div", { class: "frame" }, bar.el, h("div", { class: "middle" }, grid, history.graph.el, history.el), transport.el);
   root.replaceChildren(frame);
 
   const all: View[] = Object.values(views);

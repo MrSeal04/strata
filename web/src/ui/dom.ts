@@ -44,6 +44,8 @@ const ICONS: Record<string, string> = {
   target: "M8 2v2.5M8 11.5V14M2 8h2.5M11.5 8H14M8 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
   info: "M8 14.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM8 7.5v4M8 5v.01",
   back: "M10 3L5 8l5 5",
+  fwd: "M6 3l5 5-5 5",
+  graph: "M2 12h12M4.5 12C4.5 7 6.5 5 10 5h2.5",
   fit: "M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4",
 };
 

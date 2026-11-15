@@ -1019,6 +1019,107 @@ fn check_repo(name: &str) {
         };
         assert_eq!(history(&f), want, "{name}: history under {dir}/");
     }
+
+    // 11. Graph: every first-parent commit in order, with the codebase's lines after it equal to
+    //     `/state`'s total there; each merge's branch counts, dates and lists what it brought in;
+    //     a later window starts from the same running total.
+    let last = shas.len() as u32 - 1;
+    let g = db.graph(&id, 0, last).unwrap();
+    let gsteps = g["steps"].as_array().unwrap();
+    assert_eq!(gsteps.len(), shas.len(), "{name}: graph steps");
+    let mut lines_at = Vec::new();
+    for (i, r) in gsteps.iter().enumerate() {
+        assert_eq!(
+            r["step"].as_u64().unwrap() as usize,
+            i,
+            "{name}: graph step order"
+        );
+        assert_eq!(r["sha"].as_str().unwrap(), shas[i], "{name}: graph sha {i}");
+        let total: i64 = state_rows(&db.state(&id, i as u32, &all).unwrap())
+            .iter()
+            .map(|(_, l, _)| l)
+            .sum();
+        assert_eq!(
+            r["lines"].as_i64().unwrap(),
+            total,
+            "{name}: graph lines at {i}"
+        );
+        lines_at.push(total);
+    }
+    let branches = g["branches"].as_array().unwrap();
+    let side = g["side"].as_array().unwrap();
+    let mut merges_with_side = 0;
+    for (i, sha) in shas.iter().enumerate() {
+        let parents = git(&repo, &["rev-list", "--parents", "-n1", sha]);
+        let parents: Vec<&str> = parents.split_whitespace().skip(1).collect();
+        assert_eq!(
+            gsteps[i]["is_merge"].as_bool().unwrap(),
+            parents.len() > 1,
+            "{name}: graph merge at {i}"
+        );
+        let brought: Vec<String> = if parents.len() > 1 {
+            git(&repo, &["rev-list", sha, &format!("^{}", parents[0])])
+                .lines()
+                .filter(|l| l != sha)
+                .map(str::to_string)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let b = branches
+            .iter()
+            .find(|b| b["step"].as_u64() == Some(i as u64));
+        if brought.is_empty() {
+            assert!(b.is_none(), "{name}: graph branch at {i} brought nothing");
+            continue;
+        }
+        merges_with_side += 1;
+        let b = b.unwrap_or_else(|| panic!("{name}: graph branch for merge {i}"));
+        assert_eq!(
+            b["commits"].as_u64().unwrap() as usize,
+            brought.len(),
+            "{name}: graph branch {i} commits"
+        );
+        let times: Vec<f64> = brought
+            .iter()
+            .map(|c| {
+                git(&repo, &["log", "-1", "--format=%at", c])
+                    .trim()
+                    .parse()
+                    .unwrap()
+            })
+            .collect();
+        let lo = times.iter().cloned().fold(f64::INFINITY, f64::min);
+        let hi = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert_eq!(
+            (b["first"].as_f64().unwrap(), b["last"].as_f64().unwrap()),
+            (lo, hi),
+            "{name}: graph branch {i} dates"
+        );
+        // (the fixtures' branches are under the per-branch cap, so all are listed)
+        let mut got: Vec<String> = side
+            .iter()
+            .filter(|s| s["step"].as_u64() == Some(i as u64))
+            .map(|s| s["sha"].as_str().unwrap().to_string())
+            .collect();
+        let mut want = brought.clone();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want, "{name}: graph side commits of {i}");
+    }
+    assert_eq!(branches.len(), merges_with_side, "{name}: graph branches");
+    if last >= 2 {
+        let mid = last / 2;
+        let w = db.graph(&id, mid, last).unwrap();
+        let ws = w["steps"].as_array().unwrap();
+        assert_eq!(
+            ws[0]["step"].as_u64().unwrap() as u32,
+            mid,
+            "{name}: graph window start"
+        );
+        let got: Vec<i64> = ws.iter().map(|r| r["lines"].as_i64().unwrap()).collect();
+        assert_eq!(got, lines_at[mid as usize..], "{name}: graph window lines");
+    }
 }
 
 fn state_sql_for_test(s: &str, step: u32) -> String {

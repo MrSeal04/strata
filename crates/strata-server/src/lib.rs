@@ -616,6 +616,20 @@ async fn repo_side(
     ))
 }
 
+/// The commit graph over `from..=to` (at most `GRAPH_MAX_STEPS` steps, ending at `to`).
+async fn repo_graph(
+    State(st): State<Shared>,
+    Path(repo): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    use strata_store::db::GRAPH_MAX_STEPS;
+    let num = |k: &str| q.get(k).and_then(|v| v.parse::<u32>().ok());
+    let from = num("from").unwrap_or(0);
+    let to = num("to").unwrap_or(from.saturating_add(GRAPH_MAX_STEPS - 1));
+    let from = from.max(to.saturating_sub(GRAPH_MAX_STEPS - 1));
+    Ok(Json(blocking(move || st.db.graph(&repo, from, to)).await?))
+}
+
 async fn repo_search(
     State(st): State<Shared>,
     Path(repo): Path<String>,
@@ -710,6 +724,7 @@ pub fn router(state: Shared) -> Router {
         .route("/r/{repo}/history", get(repo_history))
         .route("/r/{repo}/history/rows", get(repo_history_rows))
         .route("/r/{repo}/side/{n}", get(repo_side))
+        .route("/r/{repo}/graph", get(repo_graph))
         .route("/r/{repo}/search", get(repo_search))
         .route("/r/{repo}/dirs", get(repo_dirs))
         .merge(render::routes())

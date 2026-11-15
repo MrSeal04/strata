@@ -178,6 +178,8 @@ export const api = {
   /** The side commits a merge brought in, newest first. */
   side: (repo: string, step: number, limit: number) =>
     json<{ total: number; commits: SideCommit[] }>(`${base(repo)}/side/${step}?limit=${limit}`),
+  /** The commit graph over steps from..=to (unfiltered; at most 2,000 steps). */
+  graph: (repo: string, from: number, to: number) => json<GraphData>(`${base(repo)}/graph?from=${from}&to=${to}`),
   search: (repo: string, q: string, kind: string) =>
     json<{ steps: number[]; paths: number[] }>(`${base(repo)}/search?${new URLSearchParams({ q, kind })}`),
   dirs: (repo: string, p: URLSearchParams) => json<{ name: string; is_dir: boolean; lines: number; files: number }[]>(`${base(repo)}/dirs?${p}`),
@@ -216,6 +218,42 @@ export interface SideCommit {
   author: string | null;
   author_id: number | null;
   author_time: number;
+}
+
+/** `/graph`: first-parent commits, and each merge's branch with its newest side commits. */
+export interface GraphData {
+  from: number;
+  to: number;
+  steps: {
+    step: number;
+    sha: string;
+    summary: string;
+    author: string | null;
+    /** Axis (monotonic committer) time. */
+    time: number;
+    author_time: number;
+    is_merge: boolean;
+    side_count: number;
+    adds: number;
+    dels: number;
+    /** The codebase's lines after this commit. */
+    lines: number;
+  }[];
+  branches: {
+    /** The merge's step. */
+    step: number;
+    commits: number;
+    authors: number;
+    top_author: string | null;
+    /** First and last side commit, by author date. */
+    first: number;
+    last: number;
+    /** Top-level folder the merge changed most ("" for root files; null when it changed none). */
+    dir: string | null;
+  }[];
+  /** Side commits by merge step, oldest first; each merge lists its newest `side_per_branch`. */
+  side: { step: number; sha: string; summary: string; author: string | null; author_time: number }[];
+  side_per_branch: number;
 }
 
 /** `/step/{n}?brief=1`. */

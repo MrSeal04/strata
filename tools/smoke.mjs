@@ -2,7 +2,7 @@
 // Smoke test: extract a fixture into a temporary cache, serve it, open the home page and the
 // dashboard at desktop and phone widths, exercise every view mode, playback and zoom, the card
 // header options and unlinked cards, check that phones scroll the page until a card is zoomed,
-// drag the compare markers, use the branch history, update and then delete the repo from its
+// drag the compare markers, use the branch history and its graph, update and then delete the repo from its
 // home card, and fail on any page, console or HTTP error.
 // Usage: node tools/smoke.mjs [strata-binary] [out-dir]
 import { execFileSync, spawn } from "node:child_process";
@@ -293,6 +293,53 @@ try {
       if (r.back !== r.steps) failures.push(`${tag}: clearing the filter should bring every commit back (${JSON.stringify(r)})`);
       if (!r.closed) failures.push(`${tag}: Close should hide the history`);
       await page.screenshot({ path: join(out, `${tag}.png`) });
+      await page.close();
+    }
+  }
+  // Graph (from the history): a dot per first-parent commit, a lane per merge that brought
+  // commits in with a dot per such commit, clicking a commit moves the cursor, Escape closes it.
+  {
+    const kitchen = join(home, "fixtures/kitchen");
+    const git = (...a) => execFileSync("git", ["-C", kitchen, ...a], { encoding: "utf8" }).trim();
+    const fp = git("log", "--first-parent", "--reverse", "--format=%H %P").split("\n").map((l) => l.split(" "));
+    const brought = fp.filter((c) => c.length > 2).map(([sha, p1]) => git("rev-list", sha, `^${p1}`).split("\n").filter((s) => s && s !== sha).length).filter((n) => n > 0);
+    for (const [w, hgt] of [[1440, 900], [420, 900]]) {
+      const tag = `graph-${w}`;
+      const page = await browser.newPage();
+      page.on("pageerror", (e) => failures.push(`${tag}: page error: ${e.message}`));
+      page.on("console", (m) => m.type() === "error" && failures.push(`${tag}: console: ${m.text()}`));
+      page.on("response", (r) => r.status() >= 400 && failures.push(`${tag}: HTTP ${r.status()} ${r.url()}`));
+      await page.setViewport({ width: w, height: hgt });
+      await page.goto(`http://127.0.0.1:${port}/#/r/${id}`, { waitUntil: "networkidle0" });
+      await new Promise((r) => setTimeout(r, 1500));
+      await page.evaluate(() => [...document.querySelectorAll(".filterbar button")].find((b) => b.textContent === "History").click());
+      await new Promise((r) => setTimeout(r, 500));
+      await page.evaluate(() => [...document.querySelectorAll(".history .hhead button")].find((b) => b.textContent === "Graph").click());
+      await page.waitForSelector(".graph-sheet .ghost svg", { timeout: 15000 }).catch(() => failures.push(`${tag}: the graph never drew`));
+      const r = await page.evaluate(() => ({
+        steps: window.strata.app.store.get().steps,
+        main: document.querySelectorAll('.graph-sheet circle[data-k^="m:"]').length,
+        branches: document.querySelectorAll(".graph-sheet g.gbr").length,
+        side: document.querySelectorAll('.graph-sheet circle[data-k^="s:"]').length,
+        pressed: document.querySelector(".history .hhead button.on")?.textContent,
+      }));
+      if (r.main !== r.steps) failures.push(`${tag}: a dot per first-parent commit (${JSON.stringify(r)})`);
+      if (r.branches !== brought.length || r.side !== brought.reduce((a, b) => a + b, 0)) failures.push(`${tag}: a lane per merge with its commits, ${brought} (${JSON.stringify(r)})`);
+      if (r.pressed !== "Graph") failures.push(`${tag}: the Graph button should show it is on`);
+      const dot = await page.$('.graph-sheet circle[data-k="m:0"]');
+      await dot.evaluate((e) => e.scrollIntoView({ block: "center", inline: "center" }));
+      const box = await dot.boundingBox();
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      const tip = await page.$eval(".tip", (e) => e.style.display !== "none" && e.textContent.includes("#1 ·")).catch(() => false);
+      if (!tip) failures.push(`${tag}: hovering the first commit should show its tooltip`);
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      await new Promise((r) => setTimeout(r, 400));
+      const cursor = await page.evaluate(() => window.strata.app.store.get().cursor);
+      if (cursor !== 0) failures.push(`${tag}: clicking the first commit should move the cursor there (cursor ${cursor})`);
+      await page.screenshot({ path: join(out, `${tag}.png`) });
+      await page.keyboard.press("Escape");
+      const closed = await page.evaluate(() => document.querySelector(".graph-sheet").hidden && !document.querySelector(".history").hidden);
+      if (!closed) failures.push(`${tag}: Escape should close the graph and keep the history`);
       await page.close();
     }
   }

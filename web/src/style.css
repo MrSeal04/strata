@@ -240,6 +240,56 @@ input[type="range"] { accent-color: var(--accent); }
   body.history-open aside.commit-panel { right: calc(var(--history-w) + 20px); }
 }
 
+/* ---------- commit graph (opened from the history) ---------- */
+.middle { position: relative; }
+.graph-sheet {
+  position: absolute; z-index: 20; top: 8px; bottom: 8px; left: 8px; right: calc(var(--history-w) + 16px);
+  display: flex; flex-direction: column; min-width: 0;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); overflow: hidden;
+}
+.graph-sheet[hidden] { display: none; }
+.graph-sheet .ghead { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 6px 8px 2px 12px; min-height: 34px; }
+.graph-sheet .ghead h2 { margin: 0; font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.graph-sheet .ghead .spacer { flex: 1; }
+.graph-sheet .ghead .btn:not(.icon), .graph-sheet .ghead select { height: 24px; padding: 0 8px; font-size: 12px; }
+.graph-sheet .ghead .btn.icon { width: 24px; height: 24px; }
+.graph-sheet .ghead .btn svg { width: 14px; height: 14px; }
+.graph-sheet .ginfo { font-size: 11px; color: var(--ink-muted); }
+.graph-sheet .gnote { margin: 2px 12px 6px; font-size: 11.5px; color: var(--ink-2); max-width: 980px; line-height: 1.45; }
+.graph-sheet .glegend { padding: 0 12px 6px; border-bottom: 1px solid var(--grid); }
+.graph-sheet .glegend .it { cursor: default; }
+.graph-sheet .gscroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; outline: none; }
+.graph-sheet .ghost svg { display: block; }
+.graph-sheet .gempty { padding: 24px; color: var(--ink-muted); }
+.gtick { stroke: var(--grid); stroke-width: 1; }
+.gaxis { fill: var(--ink-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.gaxisline { stroke: var(--border); }
+.gbreak { fill: var(--surface-2); }
+.gzig { fill: none; stroke: var(--ink-muted); stroke-width: 1.2; }
+.gband { fill: var(--ink-muted); opacity: 0.16; }
+.gbandline { fill: none; stroke: var(--ink-2); stroke-width: 1.5; }
+.gend { fill: var(--ink); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.gtag line { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.5; }
+.gtag text { fill: var(--ink-2); font-size: 10.5px; }
+.gtag:hover line { opacity: 1; stroke: var(--ink); }
+.gtag:hover text { fill: var(--ink); }
+.ghit { fill: transparent; }
+.gmain { stroke: var(--ink); stroke-width: 2.5; }
+.glane { fill: var(--ink); font-size: 12px; font-weight: 600; }
+.gbr { cursor: pointer; }
+.gbrline { fill: none; stroke-width: 2; }
+.gbrline.gstub { stroke-dasharray: 2 3; }
+.dense .gbrline { stroke-width: 1.25; }
+.dense .gc:not(.gmerge) { stroke-width: 0; }
+.gbrhit { fill: none; stroke: transparent; stroke-width: 10; }
+.gbr:hover .gbrline { stroke-width: 3.5; }
+.glbl { fill: var(--ink-2); font-size: 10.5px; pointer-events: none; }
+.gc { cursor: pointer; stroke: var(--surface); stroke-width: 1; }
+.gc:hover { stroke: var(--ink); stroke-width: 1.5; }
+.gc.gmerge { stroke: var(--ink); stroke-width: 1.5; }
+.gcur line { stroke: var(--accent); stroke-width: 1.5; }
+.gcur text { fill: var(--accent); font-size: 11px; font-weight: 600; }
+
 /* ---------- transport ---------- */
 .transport {
   display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center;
@@ -338,5 +388,6 @@ div.repo-card { position: relative; display: flex; flex-direction: column; }
   .middle { display: block; }
   /* (the page scrolls here: the history is a sheet over it, under commit details) */
   .history { position: fixed; z-index: 35; inset: 8px; width: auto; margin: 0; box-shadow: var(--shadow); }
+  .graph-sheet { position: fixed; z-index: 36; inset: 8px; }
 }
 .commit-panel td.num { white-space: nowrap; }

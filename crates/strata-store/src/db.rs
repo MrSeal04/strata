@@ -46,6 +46,14 @@ struct QueryCache {
 
 const CACHE_BYTES: usize = 256 << 20;
 
+/// Side commits a `/graph` answer lists in all, shared among its merges, each listing between
+/// `GRAPH_SIDE_MIN` and `GRAPH_SIDE_MAX` (its newest); the rest are counted, not listed.
+pub const GRAPH_SIDE_ROWS: usize = 20_000;
+const GRAPH_SIDE_MIN: usize = 20;
+const GRAPH_SIDE_MAX: usize = 300;
+/// The most first-parent steps one `/graph` answer covers.
+pub const GRAPH_MAX_STEPS: u32 = 2_000;
+
 impl QueryCache {
     fn get(&mut self, sql: &str) -> Option<Bytes> {
         self.tick += 1;
@@ -1202,6 +1210,66 @@ impl Db {
             ))?;
             let total = total.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
             Ok(json!({ "total": total, "commits": commits }))
+        })
+    }
+
+    /// The commit graph over steps `from..=to` (unfiltered): each first-parent commit with the
+    /// codebase's size after it, and each merge's branch: its first and last side commit (author
+    /// dates), its most frequent author, and its newest side commits, at most `GRAPH_SIDE_ROWS`
+    /// in all. The tables keep no parents for side commits, so a branch is known by the commits
+    /// it brought in, not by where it forked.
+    pub fn graph(&self, repo: &str, from: u32, to: u32) -> anyhow::Result<Value> {
+        let to = to.max(from);
+        self.with(repo, |c, s| {
+            let base: i64 = c.query_row(
+                &format!("SELECT coalesce(sum(line_delta), 0)::BIGINT FROM {s}.changes WHERE step < {from}"),
+                [],
+                |r| r.get(0),
+            )?;
+            let mut steps = json_rows(c, &format!(
+                "WITH d AS (SELECT step, sum(line_delta)::BIGINT AS d FROM {s}.changes
+                            WHERE step BETWEEN {from} AND {to} GROUP BY step)
+                 SELECT st.step, st.sha, st.summary, k.name AS author, st.axis_time::DOUBLE AS time,
+                        st.author_time::DOUBLE AS author_time, st.is_merge, st.side_count,
+                        st.adds, st.dels, coalesce(d.d, 0)::BIGINT AS delta
+                 FROM {s}.steps st LEFT JOIN d USING (step) LEFT JOIN {s}.canon k ON k.author_id = st.author_id
+                 WHERE st.step BETWEEN {from} AND {to} ORDER BY st.step"
+            ))?;
+            let mut lines = base;
+            for r in &mut steps {
+                lines += r["delta"].as_i64().unwrap_or(0);
+                if let Some(o) = r.as_object_mut() {
+                    o.remove("delta");
+                    o.insert("lines".into(), json!(lines));
+                }
+            }
+            let branches = json_rows(c, &format!(
+                "WITH a AS (SELECT sc.landing_step AS step, k.name, count(*) AS n,
+                                   min(sc.author_time) AS t0, max(sc.author_time) AS t1
+                            FROM {s}.side_commits sc LEFT JOIN {s}.canon k ON k.author_id = sc.author_id
+                            WHERE sc.landing_step BETWEEN {from} AND {to} GROUP BY 1, 2),
+                      b AS (SELECT step, sum(n)::INTEGER AS commits, count(*)::INTEGER AS authors,
+                                   arg_max(name, n) AS top_author, min(t0)::DOUBLE AS first, max(t1)::DOUBLE AS last
+                            FROM a GROUP BY step),
+                      -- the top-level folder the merge changed most ('' for files at the root)
+                      d AS (SELECT c.step, CASE WHEN contains(p.path, '/') THEN split_part(p.path, '/', 1) ELSE '' END AS dir,
+                                   sum(c.adds + c.dels) AS n
+                            FROM {s}.changes c JOIN {s}.paths p USING (path_id)
+                            WHERE c.step IN (SELECT step FROM b) GROUP BY 1, 2)
+                 SELECT b.*, (SELECT arg_max(d.dir, d.n) FROM d WHERE d.step = b.step) AS dir
+                 FROM b ORDER BY step"
+            ))?;
+            let per = (GRAPH_SIDE_ROWS / branches.len().max(1)).clamp(GRAPH_SIDE_MIN, GRAPH_SIDE_MAX);
+            let side = json_rows(c, &format!(
+                "SELECT step, sha, summary, author, author_time FROM (
+                   SELECT sc.landing_step AS step, sc.sha, sc.summary, k.name AS author,
+                          sc.author_time::DOUBLE AS author_time,
+                          row_number() OVER (PARTITION BY sc.landing_step ORDER BY sc.author_time DESC, sc.sha) AS rn
+                   FROM {s}.side_commits sc LEFT JOIN {s}.canon k ON k.author_id = sc.author_id
+                   WHERE sc.landing_step BETWEEN {from} AND {to})
+                 WHERE rn <= {per} ORDER BY step, author_time, sha"
+            ))?;
+            Ok(json!({ "from": from, "to": to, "steps": steps, "branches": branches, "side": side, "side_per_branch": per }))
         })
     }
 

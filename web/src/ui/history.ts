@@ -3,6 +3,7 @@ import type { App } from "../app";
 import type { SearchState } from "../state/store";
 import { colorMaps } from "../model/colors";
 import { fmt, h, icon } from "./dom";
+import { GraphSheet } from "./graph";
 
 /** Every row has one height, commit or side commit, so the list renders only what's in view. */
 const ROW = 46;
@@ -84,6 +85,8 @@ export class HistoryPanel {
   /** Search matches, for the search they came from. */
   private matches: { of: SearchState | null; steps: Set<number> } = { of: null, steps: new Set() };
   private unsubs: (() => void)[] = [];
+  /** The commit graph, opened from the header; it closes with the panel. */
+  readonly graph: GraphSheet;
 
   constructor(private app: App) {
     for (const t of app.summary.tags) this.tags.set(t.step, [...(this.tags.get(t.step) ?? []), t.name]);
@@ -92,13 +95,20 @@ export class HistoryPanel {
       this.userAt = 0;
       this.follow(true);
     });
+    this.graph = new GraphSheet(app);
+    const graphBtn = h("button", { class: "btn", title: "Show the commit graph: branches, merges and the codebase's size over time", "aria-pressed": "false" }, icon("graph"), "Graph");
+    graphBtn.addEventListener("click", () => this.graph.toggle());
+    this.graph.onToggle = (on) => {
+      graphBtn.classList.toggle("on", on);
+      graphBtn.setAttribute("aria-pressed", String(on));
+    };
     const close = h("button", { class: "btn icon", title: "Close", "aria-label": "Close history" }, icon("close"));
     close.addEventListener("click", () => app.store.set({ history: false }));
     this.info = h("div", { class: "info num" });
     this.space = h("div", { class: "hspace", role: "list" });
     this.scroller = h("div", { class: "hscroll", tabindex: "-1" }, this.space);
     this.el = h("aside", { class: "history", "aria-label": "Branch history", hidden: true },
-      h("div", { class: "hhead" }, h("h2", { text: "History" }), h("span", { class: "branch mono", text: app.meta.branch, title: `${app.meta.branch} @ ${app.meta.head.slice(0, 10)}` }), h("span", { class: "spacer" }), current, close),
+      h("div", { class: "hhead" }, h("h2", { text: "History" }), h("span", { class: "branch mono", text: app.meta.branch, title: `${app.meta.branch} @ ${app.meta.head.slice(0, 10)}` }), h("span", { class: "spacer" }), graphBtn, current, close),
       this.info,
       this.scroller,
     );
@@ -143,6 +153,7 @@ export class HistoryPanel {
   }
 
   destroy() {
+    this.graph.destroy();
     this.unsubs.forEach((u) => u());
     this.ro.disconnect();
     cancelAnimationFrame(this.frame);
@@ -171,7 +182,7 @@ export class HistoryPanel {
   private setOpen(on: boolean) {
     this.open = on;
     this.el.hidden = !on;
-    if (!on) return;
+    if (!on) return this.graph.close();
     this.dirty = true;
     if (this.stale) void this.reload();
     else {
