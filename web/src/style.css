@@ -292,13 +292,14 @@ input[type="range"] { accent-color: var(--accent); }
 
 /* ---------- transport ---------- */
 .transport {
-  display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center;
+  /* (a fixed column for the commit: sized to its text, the scrubber resized under the pointer while seeking) */
+  display: grid; grid-template-columns: auto minmax(0, 1fr) clamp(220px, 34vw, 600px); gap: 10px; align-items: center;
   padding: 8px 12px; background: var(--surface); border-top: 1px solid var(--border);
 }
 .transport .ctl { display: flex; gap: 4px; align-items: center; }
 .transport .scrub { position: relative; height: 34px; min-width: 0; }
 .transport .scrub canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer; touch-action: none; }
-.transport .now { display: flex; gap: 8px; align-items: center; min-width: 0; max-width: 46vw; }
+.transport .now { display: flex; gap: 8px; align-items: center; min-width: 0; }
 .transport .now .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .transport .now .date { white-space: nowrap; }
 
@@ -383,7 +384,6 @@ div.repo-card { position: relative; display: flex; flex-direction: column; }
     grid-template-areas: "treemap" "tree" "area" "bars";
   }
   .transport { position: sticky; bottom: 0; grid-template-columns: 1fr; }
-  .transport .now { max-width: none; }
   .panel { top: 8px; right: 8px; left: 8px; width: auto; }
   .middle { display: block; }
   /* (the page scrolls here: the history is a sheet over it, under commit details) */

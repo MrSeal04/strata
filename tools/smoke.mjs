@@ -343,6 +343,38 @@ try {
       await page.close();
     }
   }
+  // The scrubber keeps its width whatever commit the transport bar names (it used to resize
+  // under the pointer while seeking), and commit details close when "strata" leads home.
+  {
+    const tag = "transport";
+    const page = await browser.newPage();
+    page.on("pageerror", (e) => failures.push(`${tag}: page error: ${e.message}`));
+    page.on("console", (m) => m.type() === "error" && failures.push(`${tag}: console: ${m.text()}`));
+    await page.setViewport({ width: 1440, height: 900 });
+    await page.goto(`http://127.0.0.1:${port}/#/r/${id}`, { waitUntil: "networkidle0" });
+    await new Promise((r) => setTimeout(r, 1500));
+    const r = await page.evaluate(async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const a = window.strata.app;
+      const widths = new Set();
+      const texts = new Set();
+      for (let s = 0; s < a.store.get().steps; s++) {
+        a.player.seek(s);
+        await sleep(400);
+        widths.add(Math.round(document.querySelector(".transport .scrub").getBoundingClientRect().width));
+        texts.add(document.querySelector(".transport .what").textContent);
+      }
+      return { widths: [...widths], texts: texts.size };
+    });
+    if (r.texts < 3 || r.widths.length !== 1) failures.push(`${tag}: the scrubber should keep its width while seeking (${JSON.stringify(r)})`);
+    await page.click(".transport .now");
+    await page.waitForSelector(".commit-panel h3", { timeout: 10000 }).catch(() => failures.push(`${tag}: commit details never opened`));
+    await page.click(".filterbar a.title");
+    await page.waitForFunction(() => location.hash === "#/", { timeout: 10000 }).catch(() => failures.push(`${tag}: "strata" should lead home`));
+    await new Promise((r) => setTimeout(r, 500));
+    if (await page.$(".commit-panel")) failures.push(`${tag}: commit details should close on the way home`);
+    await page.close();
+  }
   // Last, since everything above reads kitchen: update it from its home card, then delete it.
   {
     const page = await browser.newPage();

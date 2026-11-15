@@ -20,6 +20,7 @@ import { h } from "./dom";
 import { FilterBar } from "./filterbar";
 import { HistoryPanel } from "./history";
 import { openCommit, openSettings } from "./panels";
+import { tooltip } from "./tooltip";
 import { Transport } from "./transport";
 
 export interface Dashboard {
@@ -166,6 +167,9 @@ export async function openDashboard(root: HTMLElement, repo: string): Promise<Da
       unsubs.forEach((u) => u());
       document.removeEventListener("keydown", onKey);
       document.body.classList.remove("history-open");
+      // (commit details and the tooltip live on <body>, outside the frame that goes away)
+      document.querySelectorAll(".commit-panel").forEach((el) => el.remove());
+      tooltip.hide();
       history.destroy();
       all.forEach((v) => v.destroy());
     },
