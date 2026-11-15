@@ -32,7 +32,9 @@ deb: bundled
 check: web/node_modules
 	$(CARGO) fmt --check
 	$(CARGO) clippy --all-targets -- -D warnings
-	$(CARGO) test
+	# (cargo >= 1.100 builds test binaries under target/debug/build/<pkg>/<hash>/out/, out of the
+	# rpath's reach of the downloaded libduckdb.so)
+	LD_LIBRARY_PATH="$(CURDIR)/target/debug/deps$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}" $(CARGO) test
 	cd web && npx tsc --noEmit && npx vitest run
 
 test: check
